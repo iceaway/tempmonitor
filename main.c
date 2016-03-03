@@ -5,6 +5,12 @@
 #include <stdlib.h>
 #include <stdint.h>
 
+//#define AVR_I2C
+
+#ifdef AVR_I2C
+#include "USI_TWI_Master.h"
+#endif
+
 #define BAUDRATE 1200
 
 #define STX 0xAC
@@ -32,8 +38,10 @@
 
 #define PORT_I2C      PORTB
 #define DDR_I2C       DDRB
+#define PIN_I2C       PINB
 #define PIN_I2C_SDA   PB5
 #define PIN_I2C_SCL   PB7
+#define I2C_READ_BIT  0
 
 #define SET_INPUT(ddr, pin)   ddr &= ~(1 << pin)
 #define SET_OUTPUT(ddr, pin)  ddr |= (1 << pin)
@@ -48,7 +56,7 @@ static void uart_tx_single(uint8_t c);
 ISR(WDT_OVERFLOW_vect)
 {
   /* Wake up the CPU */
-  //PORTB ^= (1 << PB0);
+//  PORTB ^= (1 << PB0);
 
 }
 
@@ -59,7 +67,7 @@ ISR(TIMER0_COMPA_vect)
 
 ISR(TIMER0_OVF_vect)
 {
-  PORTB ^= (1 << PB0);
+  //PORTB ^= (1 << PB0);
 }
 
 static uint8_t crc(uint8_t *buf, size_t buflen)
@@ -120,7 +128,7 @@ static void uart_tx_single(uint8_t c)
 
 }
 
-static void init_gpio(void)
+static void gpio_init(void)
 {
   /* Test output pins */
   DDRB |= (1 << PB0);
@@ -129,43 +137,94 @@ static void init_gpio(void)
   /* Soft uart */
   DDRD |= (1 << PD4);
 
+  /* Disable all pull-ups */
+  MCUCR |= (1 << PUD);
+}
+
+static void i2c_start(void)
+{
+  /* Generate start condition */
+  SET_OUTPUT(DDR_I2C, PIN_I2C_SCL);
+  SET_OUTPUT(DDR_I2C, PIN_I2C_SDA);
+
+  SET_HIGH(PORT_I2C, PIN_I2C_SCL);
+  SET_HIGH(PORT_I2C, PIN_I2C_SDA);
+  /* Make sure that SCL is high */
+  while (!(PIN_I2C & (1 << PIN_I2C_SCL)));
+  _delay_us(3);
+
+  SET_LOW(PORT_I2C, PIN_I2C_SDA);
+  _delay_us(3);
+  SET_LOW(PORT_I2C, PIN_I2C_SCL);
+  SET_HIGH(PORT_I2C, PIN_I2C_SDA);
+}
+
+static void i2c_stop(void)
+{
+  /* Stop condition */
+  SET_OUTPUT(DDR_I2C, PIN_I2C_SCL);
+  SET_OUTPUT(DDR_I2C, PIN_I2C_SDA);
+
+  SET_LOW(PORT_I2C, PIN_I2C_SDA);
+  SET_HIGH(PORT_I2C, PIN_I2C_SCL);
+  /* Make sure that SCL is high */
+  while (!(PIN_I2C & (1 << PIN_I2C_SCL)));
+  _delay_us(3);
+
+  SET_HIGH(PORT_I2C, PIN_I2C_SDA);
+  _delay_us(3);
+  SET_HIGH(PORT_I2C, PIN_I2C_SCL);
+  SET_HIGH(PORT_I2C, PIN_I2C_SDA);
+  _delay_us(3);
+  /* Release SDA and SCL */
+  SET_INPUT(DDR_I2C, PIN_I2C_SCL);
+  SET_LOW(PORT_I2C, PIN_I2C_SCL);
+  SET_INPUT(DDR_I2C, PIN_I2C_SDA);
+  SET_LOW(PORT_I2C, PIN_I2C_SDA);
+}
+
+static uint8_t i2c_exchange(uint8_t bits)
+{
+  uint8_t tmp;
+  USISR |= (1 << USISIF) | (1 << USIOIF) | (1 << USIPF) | (1 << USIDC) | (bits & 0x0f);
+  do {
+    _delay_us(2);
+    USICR |= (1 << USITC);
+    while (!(PIN_I2C & (1 << PIN_I2C_SCL)));
+    _delay_us(2);
+    USICR |= (1 << USITC);
+  } while (!(USISR & (1 << USIOIF)));
+
+  _delay_us(4);
+  tmp = USIDR;
+  USIDR = 0xff;
+
+  return tmp;
 }
 
 static int i2c_transfer(uint8_t *buf, uint8_t bufsize)
 {
   int readmode = 0;
+  uint8_t tmp;
+
   if (buf[0] & (1 << I2C_READ_BIT)) {
     readmode = 1;
   }
 
-  SET_HIGH(PORT_I2C, PIN_I2C_SCL);
-  /* Make sure that SCL is high */
-  while (!(PIN_I2C & (1 << PIN_I2C_SCL)));
-  _delay_us(3);
-
-  /* Generate start condition */
-  SET_LOW(PORT_I2C, PIN_I2C_SDA);
-  _delay_us(3);
-  SET_LOW(PORT_I2C, PIN_I2C_SCL);
-  SET_HIGH(PORT_I2C, PIN_I2C_SDA);
-
-
+  i2c_start();
   /* Transmit data */
 
-  /* Stop condition */
-  SET_LOW(PORT_I2C, PIN_I2C_SDA);
-  SET_HIGH(PORT_I2C, PIN_I2C_SCL);
-  /* Make sure that SCL is high */
-  while (!(PIN_I2C & (1 << PIN_I2C_SCL)));
-  _delay_us(3);
+  /* Send address */
+  SET_LOW(PORT_I2C, PIN_I2C_SCL);
+  USIDR = buf[0];
+  i2c_exchange(8);
 
-  /* Generate start condition */
-  SET_HIGH(PORT_I2C, PIN_I2C_SDA);
-  _delay_us(3);
-  SET_HIGH(PORT_I2C, PIN_I2C_SCL);
-  SET_HIGH(PORT_I2C, PIN_I2C_SDA);
+  /* Get 1 bit of ack */
+  SET_INPUT(DDR_I2C, PIN_I2C_SDA);
+  tmp = i2c_exchange(1);
 
-  
+  i2c_stop();
+
 
 }
 
@@ -173,15 +232,12 @@ static void i2c_init(void)
 {
   /* Set both I2C pins as outputs */
 
-  /* I2C SDA - PB5 */
-  SET_OUTPUT(DDR_I2C, PIN_I2C_SDA);
+  /* Release SCL and SDA (pulled up externally) */
+  SET_INPUT(DDR_I2C, PIN_I2C_SDA);
+  SET_LOW(PORT_I2C, PIN_I2C_SDA);
 
-  /* I2C SCL - PB7 */
-  SET_OUTPUT(DDR_I2C, PIN_I2C_SCL);
-
-  /* Enable pull-ups/set high */
-  SET_HIGH(PORT_I2C, PIN_I2C_SDA);
-  SET_HIGH(PORT_I2C, PIN_I2C_SCL);
+  SET_INPUT(DDR_I2C, PIN_I2C_SCL);
+  SET_LOW(PORT_I2C, PIN_I2C_SCL);
 
   USIDR = 0xff;
 
@@ -201,7 +257,7 @@ static void i2c_init(void)
 
 }
 
-static void init_watchdog(void)
+static void watchdog_init(void)
 {
   /*
    * The watchdog is used to wake up the system periodically in order to 
@@ -238,34 +294,37 @@ int main(void)
 
   gpio_init();
   watchdog_init();
+#ifdef AVR_I2C
+  USI_TWI_Master_Initialise();
+#else
   i2c_init();
+#endif
   power_saving();
 
   /* Enable interrupts globally */
   sei();
 
-  /* len = frame_build(frame, 8); */
+  frame[0] = (1 << 1);
+  frame[1] = 0xab;
   for (;;) {
-    //_delay_ms(40);
-    //PORTB ^= (1 << PB1);
-#if 0
+    //PORTB ^= (1 << PB0);
+    _delay_ms(10);
+#ifdef AVR_I2C
+    USI_TWI_Start_Transceiver_With_Data(frame, 2);
+#else
+    i2c_transfer(frame, 2);
+#endif
+
+#ifdef ENABLE_SLEEP
     MCUSR |= (1 << SM0) | (1 << SM1);
     sleep_enable();
     sleep_cpu();
     sleep_disable();
 #endif
 
-    /* Start condition */
-    //USIDR = 0;
-    /* First byte */
-    //USIDR = 0x81;
-
-    //PORTB ^= (1 << PB0);
-    /*
+#if 0
     uart_tx(frame, len);
-    _delay_ms(20);
-    PORTB &= ~(1 << PB0);
-    */
+#endif
   }
 }
 
