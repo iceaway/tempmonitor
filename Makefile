@@ -1,5 +1,5 @@
 BIN=main
-OBJS=main.o USI_TWI_Master.o
+OBJS=main.o i2c.o #USI_TWI_Master.o 
 
 CC=avr-gcc
 OBJCOPY=avr-objcopy
