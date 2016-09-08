@@ -223,7 +223,7 @@ int main(void)
   /* Enable interrupts globally */
   sei();
 
-  i2cbuf[0] = (0x40 << 1);
+  i2cbuf[0] = (0x40 << 1) | 0x01; 
   i2cbuf[1] = 0x00;
 
   for (;;) {
@@ -238,7 +238,7 @@ int main(void)
 #elif defined(OTHI2C)
     USI_I2C_Master_Start_Transmission(i2cbuf, 1);
 #else
-    i2c_transfer(i2cbuf, 1);
+    i2c_transfer(i2cbuf, 3);
 #endif
 
 #ifdef ENABLE_SLEEP

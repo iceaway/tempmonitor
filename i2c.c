@@ -70,12 +70,12 @@ static void i2c_stop(void)
   SET_LOW(PORT_I2C, PIN_I2C_SDA);
 }
 
-static uint8_t i2c_exchange(uint8_t bits, uint8_t rw)
+/* Exchange a single byte over I2C */
+static uint8_t i2c_exchange(uint8_t rw)
 {
-  uint8_t tmp;
-  uint8_t nobits = 15 - (bits * 2 - 1);
+  uint8_t tmp = 1;
   USISR |= (1 << USISIF) | (1 << USIOIF) | (1 << USIPF) | (1 << USIDC) | 
-           (nobits & 0x0f);
+           0x00;
 
   if (rw == 0) {
     SET_OUTPUT(DDR_I2C, PIN_I2C_SDA);
@@ -100,7 +100,8 @@ static uint8_t i2c_exchange(uint8_t bits, uint8_t rw)
     USIDR = 0x00;
   }
 
-  USISR |= 14;
+  USISR |= (1 << USISIF) | (1 << USIOIF) | (1 << USIPF) | (1 << USIDC) | 
+           0x0e;
   _delay_us(2);
   USICR |= (1 << USITC);
   while (!(PIN_I2C & (1 << PIN_I2C_SCL)));
@@ -146,20 +147,22 @@ int i2c_transfer(uint8_t *buf, uint8_t len)
   /* Send address */
   SET_LOW(PORT_I2C, PIN_I2C_SCL);
   USIDR = buf[idx++];
-  ret = i2c_exchange(8, 0);
+  ret = i2c_exchange(0);
 
-  if (ret != 1) {
+/*
+  if (ret != 0) {
     ret = -1;
     goto out;
   }
+  */
 
   while (idx < len) {
     if (readmode == 1) {
-      buf[idx++] = i2c_exchange(8, readmode);
+      buf[idx++] = i2c_exchange(readmode);
     } else {
       USIDR = buf[idx++];
-      ret = i2c_exchange(8, readmode);
-      if (ret != 1) {
+      ret = i2c_exchange(readmode);
+      if (ret != 0) {
         ret = -1;
         goto out;
       }
