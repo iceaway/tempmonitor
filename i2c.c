@@ -30,29 +30,30 @@ static void i2c_scl_input(void);
 static void i2c_start(void)
 {
   /* Generate start condition */
+  SET_HIGH(PORT_I2C, PIN_I2C_SCL);
+  SET_HIGH(PORT_I2C, PIN_I2C_SDA);
   SET_OUTPUT(DDR_I2C, PIN_I2C_SCL);
   SET_OUTPUT(DDR_I2C, PIN_I2C_SDA);
 
-  SET_HIGH(PORT_I2C, PIN_I2C_SCL);
-  SET_HIGH(PORT_I2C, PIN_I2C_SDA);
   /* Make sure that SCL is high */
   while (!(PIN_I2C & (1 << PIN_I2C_SCL)));
   _delay_us(3);
 
   SET_LOW(PORT_I2C, PIN_I2C_SDA);
-  _delay_us(3);
+  _delay_us(6);
   SET_LOW(PORT_I2C, PIN_I2C_SCL);
+  _delay_us(2);
   SET_HIGH(PORT_I2C, PIN_I2C_SDA);
 }
 
 static void i2c_stop(void)
 {
   /* Stop condition */
+  SET_LOW(PORT_I2C, PIN_I2C_SDA);
+  SET_HIGH(PORT_I2C, PIN_I2C_SCL);
   SET_OUTPUT(DDR_I2C, PIN_I2C_SCL);
   SET_OUTPUT(DDR_I2C, PIN_I2C_SDA);
 
-  SET_LOW(PORT_I2C, PIN_I2C_SDA);
-  SET_HIGH(PORT_I2C, PIN_I2C_SCL);
   /* Make sure that SCL is high */
   while (!(PIN_I2C & (1 << PIN_I2C_SCL)));
   _delay_us(3);
@@ -69,10 +70,19 @@ static void i2c_stop(void)
   SET_LOW(PORT_I2C, PIN_I2C_SDA);
 }
 
-static uint8_t i2c_exchange(uint8_t bits)
+static uint8_t i2c_exchange(uint8_t bits, uint8_t rw)
 {
   uint8_t tmp;
-  USISR |= (1 << USISIF) | (1 << USIOIF) | (1 << USIPF) | (1 << USIDC) | (bits & 0x0f);
+  uint8_t nobits = 15 - (bits * 2 - 1);
+  USISR |= (1 << USISIF) | (1 << USIOIF) | (1 << USIPF) | (1 << USIDC) | 
+           (nobits & 0x0f);
+
+  if (rw == 0) {
+    SET_OUTPUT(DDR_I2C, PIN_I2C_SDA);
+  } else {
+    SET_INPUT(DDR_I2C, PIN_I2C_SDA);
+  }
+
   do {
     _delay_us(2);
     USICR |= (1 << USITC);
@@ -81,17 +91,50 @@ static uint8_t i2c_exchange(uint8_t bits)
     USICR |= (1 << USITC);
   } while (!(USISR & (1 << USIOIF)));
 
+  /* All data transferred, get or send ack */
+  if (rw == 0) {
+    SET_INPUT(DDR_I2C, PIN_I2C_SDA);
+  } else {
+    tmp = USIDR;
+    SET_OUTPUT(DDR_I2C, PIN_I2C_SDA);
+    USIDR = 0x00;
+  }
+
+  USISR |= 14;
+  _delay_us(2);
+  USICR |= (1 << USITC);
+  while (!(PIN_I2C & (1 << PIN_I2C_SCL)));
+  _delay_us(2);
+  USICR |= (1 << USITC);
+
   _delay_us(4);
-  tmp = USIDR;
   USIDR = 0xff;
 
-  return tmp;
+  if (rw == 0) {
+    return tmp;
+  } else {
+    return USIDR;
+  }
 }
 
-int i2c_transfer(uint8_t *buf, uint8_t bufsize)
+int i2c_read(uint8_t address, uint8_t *buffer, uint8_t bytes)
+{
+  /* R/W bit = 1 for read */
+  uint8_t addr = (address << 1) | 0x01;
+
+}
+
+int i2c_write(uint8_t address, uint8_t *buffer, uint8_t bytes)
+{
+  uint8_t addr = (address << 1);
+}
+
+int i2c_transfer(uint8_t *buf, uint8_t len)
 {
   int readmode = 0;
   uint8_t tmp;
+  int ret = 0;
+  uint8_t idx = 0;
 
   if (buf[0] & (1 << I2C_READ_BIT)) {
     readmode = 1;
@@ -102,16 +145,30 @@ int i2c_transfer(uint8_t *buf, uint8_t bufsize)
 
   /* Send address */
   SET_LOW(PORT_I2C, PIN_I2C_SCL);
-  USIDR = buf[0];
-  i2c_exchange(8);
+  USIDR = buf[idx++];
+  ret = i2c_exchange(8, 0);
 
-  /* Get 1 bit of ack */
-  SET_INPUT(DDR_I2C, PIN_I2C_SDA);
-  tmp = i2c_exchange(1);
+  if (ret != 1) {
+    ret = -1;
+    goto out;
+  }
 
+  while (idx < len) {
+    if (readmode == 1) {
+      buf[idx++] = i2c_exchange(8, readmode);
+    } else {
+      USIDR = buf[idx++];
+      ret = i2c_exchange(8, readmode);
+      if (ret != 1) {
+        ret = -1;
+        goto out;
+      }
+    }
+  }
+
+out:
   i2c_stop();
-
-
+  return ret;
 }
 
 void i2c_init(void)

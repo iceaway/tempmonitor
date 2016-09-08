@@ -208,6 +208,7 @@ static void power_saving(void)
 int main(void)
 {
   uint8_t frame[8];
+  uint8_t i2cbuf[8];
   int len;
 
   gpio_init();
@@ -222,13 +223,22 @@ int main(void)
   /* Enable interrupts globally */
   sei();
 
+  i2cbuf[0] = (0x40 << 1);
+  i2cbuf[1] = 0x00;
+
   for (;;) {
-    //PORTB ^= (1 << PB0);
+    /*
+    PORTB |= (1 << PB0);
     _delay_ms(10);
+    PORTB &= ~(1 << PB0);
+    */
+//#define OTHI2C
 #ifdef AVR_I2C
-    USI_TWI_Start_Transceiver_With_Data(frame, 2);
+    USI_TWI_Start_Transceiver_With_Data(i2cbuf, 2);
+#elif defined(OTHI2C)
+    USI_I2C_Master_Start_Transmission(i2cbuf, 1);
 #else
-    i2c_transfer(frame, 2);
+    i2c_transfer(i2cbuf, 1);
 #endif
 
 #ifdef ENABLE_SLEEP
@@ -241,6 +251,7 @@ int main(void)
     /* Build and transmit frame with data */
     len = frame_build(frame, 8);
     uart_tx(frame, len);
+    _delay_ms(15);
   }
 }
 
