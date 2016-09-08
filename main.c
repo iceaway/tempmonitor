@@ -208,7 +208,7 @@ static void power_saving(void)
 int main(void)
 {
   uint8_t frame[8];
-  uint8_t i2cbuf[8];
+  uint8_t i2cbuf[8] = { 0 };
   int len;
 
   gpio_init();
@@ -223,8 +223,6 @@ int main(void)
   /* Enable interrupts globally */
   sei();
 
-  i2cbuf[0] = (0x40 << 1) | 0x01; 
-  i2cbuf[1] = 0x00;
 
   for (;;) {
     /*
@@ -238,7 +236,32 @@ int main(void)
 #elif defined(OTHI2C)
     USI_I2C_Master_Start_Transmission(i2cbuf, 1);
 #else
-    i2c_transfer(i2cbuf, 3);
+#if 1
+    i2cbuf[0] = (0x40 << 1) | 0x00;
+    i2cbuf[1] = 0x02; /* Write to the configuration register */
+    i2cbuf[2] = (1 << 4); /* Measure both temp and RH */
+    i2cbuf[3] = 0x00;
+    i2c_transfer(i2cbuf, 4);
+    _delay_ms(2); /* Wait a bit */
+
+#endif
+#if 1
+
+    i2cbuf[0] = (0x40 << 1) | 0x00;
+    i2cbuf[1] = 0x00; /* Measure temp and humidity */
+    i2c_transfer(i2cbuf, 2);
+    _delay_ms(15); /* Allow the device some time to measure */
+#endif
+
+#if 1
+
+    i2cbuf[0] = (0x40 << 1) | 0x01; 
+    i2cbuf[1] = 0x00;
+    i2cbuf[2] = 0x00;
+    i2c_transfer(i2cbuf, 5);
+    _delay_ms(6);
+#endif
+
 #endif
 
 #ifdef ENABLE_SLEEP
@@ -249,9 +272,10 @@ int main(void)
 #endif
 
     /* Build and transmit frame with data */
+#if 0
     len = frame_build(frame, 8);
     uart_tx(frame, len);
-    _delay_ms(15);
+#endif
   }
 }
 
