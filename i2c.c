@@ -28,8 +28,6 @@ static void i2c_start(void);
 static void i2c_stop(void);
 static uint8_t i2c_exchange(uint8_t rw);
 
-
-
 static void i2c_start(void)
 {
   /* Generate start condition */
@@ -143,7 +141,6 @@ int i2c_transfer(uint8_t *buf, uint8_t len)
   /* Send address */
   USIDR = buf[idx++];
   ret = i2c_exchange(I2C_WRITE);
-
 
   /* Return if we did not get an ACK for the address byte */
   if (ret != 0) {

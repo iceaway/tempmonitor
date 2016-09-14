@@ -1,5 +1,5 @@
 BIN=main
-OBJS=main.o i2c.o usi_i2c_master.o #USI_TWI_Master.o 
+OBJS=main.o i2c.o hdc1008.o
 
 CC=avr-gcc
 OBJCOPY=avr-objcopy
@@ -16,7 +16,7 @@ install: ${BIN}.hex
 	#avrdude -v -p atmega2560 -c arduino -P ${PORT} -b 115200 -U flash:w:$<
 	#avrdude -v -q -D -p t2313 -P ${PORT} -c usbtiny -b 115200 -U flash:w:$<
 	#avrdude -v -q -p t2313 -P ${PORT} -c usbtiny -e -U flash:w:$<
-	avrdude -v -q -p t2313 -c usbtiny -e -U flash:w:$<
+	avrdude -q -p t2313 -c usbtiny -e -U flash:w:$<
 
 clean:
 	rm -f ${BIN}.elf ${BIN}.hex ${OBJS}

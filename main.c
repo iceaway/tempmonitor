@@ -5,15 +5,21 @@
 #include <util/delay.h>
 #include <stdlib.h>
 #include <stdint.h>
+#include <stdio.h>
 
+#include "main.h"
 #include "i2c.h"
+#include "hdc1008.h"
 
 #define BAUDRATE 1200
+#define BAUDRATE_CALIBRATION -55
 
 #define STX 0xAC
 #define ETX 0x53
 
 #define ADDR          0x01
+
+#define PRINTBUFSIZE  16
 
 #define TYPE_TMPHUM 0x01
 
@@ -37,14 +43,15 @@
 
 static uint8_t crc(uint8_t *buf, size_t buflen);
 static int frame_build(uint8_t *buf, size_t buflen);
-static void uart_tx(uint8_t *buf, size_t len);
-static void uart_tx_single(uint8_t c);
+void uart_tx(uint8_t *buf, size_t len);
+void uart_tx_single(uint8_t c);
 
 uint8_t const random_numbers[] PROGMEM = { 2,  28, 6,  1,  10, 30, 14, 21, 14,
                                            19, 16, 13, 29, 19, 26, 28, 15, 6,
                                            17, 13, 25, 22, 24, 18, 3,  15, 26,                                        
                                            25, 17, 5 };
 uint8_t const random_numbers_size = sizeof(random_numbers)/sizeof(random_numbers[0]);
+static char printbuf[PRINTBUFSIZE];
 
 ISR(WDT_OVERFLOW_vect)
 {
@@ -84,8 +91,10 @@ static int16_t raw_to_temperature(uint16_t raw)
    * number but do the conversion on the host end with floating point support.
    * Or should we simply send the unconverted value as an unsigned integer to
    * the host for conversion there?
+   * Current solution: 
    */
-  int16_t temp = (raw * 165 - 40 * 65536); 
+  int32_t tmp = ((uint32_t)raw * 165 - 40 * 65536); 
+  int16_t temp = tmp / 6554;
   return temp;
 }
 
@@ -131,16 +140,16 @@ static int frame_build(uint8_t *buf, size_t buflen)
   return i;
 }
 
-static void uart_tx(uint8_t *buf, size_t len)
+void uart_tx(uint8_t *buf, size_t len)
 {
   size_t i;
   for (i = 0; i < len; ++i)
     uart_tx_single(buf[i]);
 }
 
-static void uart_tx_single(uint8_t c)
+void uart_tx_single(uint8_t c)
 {
-  uint32_t usecdelay = 1000000/(uint32_t)BAUDRATE;
+  uint32_t usecdelay = 1000000/(uint32_t)BAUDRATE+BAUDRATE_CALIBRATION;
   int i;
 
   /* Start bit */
@@ -205,11 +214,24 @@ static void power_saving(void)
   ACSR |= (1 << ACD);
 }
 
+char hex2ascii(uint8_t hexval)
+{
+  if (hexval < 0x0A) {
+    return ('0' + hexval);
+  } else {
+    return ('A' + (hexval - 0x0A));
+  }
+}
+
 int main(void)
 {
   uint8_t frame[8];
   uint8_t i2cbuf[8] = { 0 };
+  uint16_t conf = 0;
+  uint16_t temp = 0;
+  int16_t realtemp = 0;
   int len;
+  int16_t t,h,d,s;
 
   gpio_init();
   watchdog_init();
@@ -223,6 +245,7 @@ int main(void)
   /* Enable interrupts globally */
   sei();
 
+  hdc1008_set_address(0x40);
 
   for (;;) {
     /*
@@ -230,38 +253,32 @@ int main(void)
     _delay_ms(10);
     PORTB &= ~(1 << PB0);
     */
-//#define OTHI2C
-#ifdef AVR_I2C
-    USI_TWI_Start_Transceiver_With_Data(i2cbuf, 2);
-#elif defined(OTHI2C)
-    USI_I2C_Master_Start_Transmission(i2cbuf, 1);
-#else
-#if 1
+
+#if 0
+    conf = (1 << 12); /* Measure temp and rh */
     i2cbuf[0] = (0x40 << 1) | 0x00;
     i2cbuf[1] = 0x02; /* Write to the configuration register */
-    i2cbuf[2] = (1 << 4); /* Measure both temp and RH */
-    i2cbuf[3] = 0x00;
+    i2cbuf[2] = (conf & 0xff00) >> 8;
+    i2cbuf[3] =  conf & 0x00ff;
     i2c_transfer(i2cbuf, 4);
     _delay_ms(2); /* Wait a bit */
-
-#endif
-#if 1
 
     i2cbuf[0] = (0x40 << 1) | 0x00;
     i2cbuf[1] = 0x00; /* Measure temp and humidity */
     i2c_transfer(i2cbuf, 2);
     _delay_ms(15); /* Allow the device some time to measure */
-#endif
-
-#if 1
 
     i2cbuf[0] = (0x40 << 1) | 0x01; 
     i2cbuf[1] = 0x00;
     i2cbuf[2] = 0x00;
     i2c_transfer(i2cbuf, 5);
     _delay_ms(6);
-#endif
+    temp = (i2cbuf[1] << 8) | i2cbuf[2];
 
+    realtemp = raw_to_temperature(temp);
+    print_str("T:", 2);
+    print_dec(realtemp);
+    print_str("\r\n", 2);
 #endif
 
 #ifdef ENABLE_SLEEP
@@ -276,6 +293,43 @@ int main(void)
     len = frame_build(frame, 8);
     uart_tx(frame, len);
 #endif
+
+    //hdc1008_get_serialno(printbuf);
+    hdc1008_set_mode(HDC_TEMP_OR_RH);
+    _delay_ms(3000);
+    hdc1008_set_mode(HDC_BOTH);
+    _delay_ms(3000);
   }
+}
+
+void print_str(char *str, size_t len)
+{
+  uart_tx((uint8_t*)str, len);
+}
+
+void print_dec(int16_t dec)
+{
+  int h, d, s;
+  size_t len = 0;
+  char buf[4];
+
+  h = dec / 100;
+  buf[len++] = '0' + h;
+  d = (dec - h * 100) / 10;
+  buf[len++] = '0' + d;
+  s = (dec - h * 100 - d * 10);
+  buf[len++] = '0' + s;
+  uart_tx((uint8_t*)buf, len);
+}
+
+void print_hex(uint16_t hex)
+{
+  size_t len = 0;
+  char buf[4];
+  buf[len++] = hex2ascii((hex & 0xf000) >> 12);
+  buf[len++] = hex2ascii((hex & 0x0f00) >> 8);
+  buf[len++] = hex2ascii((hex & 0x00f0) >> 4);
+  buf[len++] = hex2ascii((hex & 0x000f));
+  uart_tx((uint8_t*)buf, len);
 }
 
