@@ -19,7 +19,6 @@
 #define BITPOS_RH_RES   8
 #define BITPOS_HEATER   13
 
-
 static uint8_t g_addr = DEFAULT_ADDR;
 static uint8_t buf[BUFSIZE];
 

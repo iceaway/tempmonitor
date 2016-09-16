@@ -15,21 +15,20 @@
 #define BAUDRATE_CALIBRATION -55
 
 #define STX 0xAC
-#define ETX 0x53
 
 #define ADDR          0x01
 
-#define TYPE_TMPHUM 0x01
+#define TYPE_TRH      0x01
+#define FRAMEBUFSIZE  9
 
 /*
  * Message frame format:
- * [ STX    | ADDR  | TYPE   | DATA   | CRC    | ETX    ]
- * STX = 0xAC
+ * [ STX    | ADDR  | TYPE   | DATA   | CRC    ]
+ * STX = 0xACAC
  * ADDR = bit 0-3 (device (source) addr), bit 4-7 (rfu)
  * TYPE = Message type
  * DATA = Message contents
  * CRC = Checksum (STX through DATA)
- * ETX = 0x53
  */
 
 /*
@@ -40,7 +39,7 @@
  */
 
 static uint8_t crc(uint8_t *buf, size_t buflen);
-static int frame_build(uint8_t *buf, size_t buflen);
+static int frame_build(uint8_t *buf, size_t buflen, int16_t temp, uint16_t rh);
 void uart_tx(uint8_t *buf, size_t len);
 void uart_tx_single(uint8_t c);
 
@@ -90,21 +89,23 @@ static uint8_t crc(uint8_t *buf, size_t buflen)
   return crc;
 }
 
-static int frame_build(uint8_t *buf, size_t buflen)
+static int frame_build(uint8_t *buf, size_t buflen, int16_t temp, uint16_t rh)
 {
   int i = 0;
-  int16_t temperature = INT16_MAX;
-  uint8_t humidity = UINT8_MAX;
+
+  if (buflen < 9)
+    return -1;
 
   buf[i++] = STX;
+  buf[i++] = STX;
   buf[i++] = ADDR & 0x0f;
-  buf[i++] = TYPE_TMPHUM;
-  buf[i++] = (temperature & 0xff00) >> 8;
-  buf[i++] = (temperature & 0x00ff);
-  buf[i++] = humidity;
+  buf[i++] = TYPE_TRH;
+  buf[i++] = (temp & 0xff00) >> 8;
+  buf[i++] = (temp & 0x00ff);
+  buf[i++] = (rh & 0xff00) >> 8;
+  buf[i++] = (rh & 0x00ff);
   buf[i] = crc(buf, i);
   ++i;
-  buf[i++] = ETX;
 
   return i;
 }
@@ -194,9 +195,10 @@ char hex2ascii(uint8_t hexval)
 
 int main(void)
 {
-  //uint8_t frame[8];
+  uint8_t frame[FRAMEBUFSIZE];
   int16_t realtemp = 0;
   uint16_t rh = 0;
+  size_t len;
 
   gpio_init();
   watchdog_init();
@@ -243,6 +245,8 @@ int main(void)
     print_str(",T:", 3);
     print_dec(realtemp);
     print_str("\r\n", 3);
+    len = frame_build(frame, FRAMEBUFSIZE, realtemp, rh);
+    uart_tx(frame, len);
     _delay_ms(3000);
   }
 }

@@ -1,0 +1,5 @@
+Improve I2C-code 
+- Check all high/low bits
+- Change SDA/SCL high to release (set as input)
+- Timeouts if SCL for some reason gets stuck low
+- Add code for clock stretching
