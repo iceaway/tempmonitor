@@ -11,6 +11,8 @@
 #include "i2c.h"
 #include "hdc1008.h"
 
+#define ENABLE_SLEEP
+
 #define BAUDRATE 1200
 #define BAUDRATE_CALIBRATION -55
 
@@ -23,12 +25,16 @@
 
 /*
  * Message frame format:
- * [ STX    | ADDR  | TYPE   | DATA   | CRC    ]
+ * [ STX    | ADDRSEQ  | TYPE   | DATA   | CRC    ]
  * STX = 0xACAC
- * ADDR = bit 0-3 (device (source) addr), bit 4-7 (rfu)
+ * ADDRSEQ = bit 0-3 (device (source) addr), bit 4-7 sequency no (1)
  * TYPE = Message type
  * DATA = Message contents
  * CRC = Checksum (STX through DATA)
+ *
+ * (1) Sequence number is used so that the receiver can keep track of 
+ * missed messages. This could be used to warn if a certain node rarely
+ * gets its messages through. Increased by one with each new temp/rh reading.
  */
 
 /*
@@ -42,29 +48,31 @@ static uint8_t crc(uint8_t *buf, size_t buflen);
 static int frame_build(uint8_t *buf, size_t buflen, int16_t temp, uint16_t rh);
 void uart_tx(uint8_t *buf, size_t len);
 void uart_tx_single(uint8_t c);
+void print_str(char *str, size_t len);
+void print_dec(int16_t dec);
 
 uint8_t const random_numbers[] PROGMEM = { 2,  28, 6,  1,  10, 30, 14, 21, 14,
                                            19, 16, 13, 29, 19, 26, 28, 15, 6,
                                            17, 13, 25, 22, 24, 18, 3,  15, 26,                                        
                                            25, 17, 5 };
-uint8_t const random_numbers_size = sizeof(random_numbers)/sizeof(random_numbers[0]);
+uint8_t const random_numbers_size PROGMEM = sizeof(random_numbers)/sizeof(random_numbers[0]);
+static uint8_t g_seqno = 0;
+static uint8_t g_update_flag = 0;
 
 ISR(WDT_OVERFLOW_vect)
 {
   static uint8_t cycles = 0;
   static uint8_t cyclesidx = 0;
 
-  if (cycles == 0)
-    cycles = random_numbers[cyclesidx++];
-  
-  --cycles;
-
   if (cycles == 0) {
-    //update_flag();
+    g_update_flag = 1;
     cycles = random_numbers[cyclesidx++ % random_numbers_size]; 
   }
+
+  --cycles;
+
   /* Wake up the CPU */
-//  PORTB ^= (1 << PB0);
+  //PORTB ^= (1 << PB0);
 
 }
 
@@ -98,7 +106,7 @@ static int frame_build(uint8_t *buf, size_t buflen, int16_t temp, uint16_t rh)
 
   buf[i++] = STX;
   buf[i++] = STX;
-  buf[i++] = ADDR & 0x0f;
+  buf[i++] = (g_seqno << 4) | ADDR;
   buf[i++] = TYPE_TRH;
   buf[i++] = (temp & 0xff00) >> 8;
   buf[i++] = (temp & 0x00ff);
@@ -199,6 +207,7 @@ int main(void)
   int16_t realtemp = 0;
   uint16_t rh = 0;
   size_t len;
+  int i;
 
   gpio_init();
   watchdog_init();
@@ -216,12 +225,6 @@ int main(void)
   hdc1008_set_mode(HDC_BOTH);
 
   for (;;) {
-    /*
-    PORTB |= (1 << PB0);
-    _delay_ms(10);
-    PORTB &= ~(1 << PB0);
-    */
-
 #ifdef ENABLE_SLEEP
     MCUSR |= (1 << SM0) | (1 << SM1);
     sleep_enable();
@@ -229,25 +232,37 @@ int main(void)
     sleep_disable();
 #endif
 
-    /* Build and transmit frame with data */
-#if 0
-    len = frame_build(frame, 8);
-    uart_tx(frame, len);
-#endif
-
     //hdc1008_measure_temp(&realtemp);
     //print_str("T:", 2);
     //print_dec(realtemp);
     //print_str("\r\n", 3);
-    hdc1008_measure_both(&realtemp, &rh);
-    print_str("H:", 2);
-    print_dec(rh);
-    print_str(",T:", 3);
-    print_dec(realtemp);
-    print_str("\r\n", 3);
-    len = frame_build(frame, FRAMEBUFSIZE, realtemp, rh);
-    uart_tx(frame, len);
+#ifdef ENABLE_SLEEP
+    if (g_update_flag) {
+#endif
+      hdc1008_measure_both(&realtemp, &rh);
+      g_seqno = (g_seqno + 1) % 16;
+#if 0
+      print_str("H:", 2);
+      print_dec(rh);
+      print_str(",T:", 3);
+      print_dec(realtemp);
+      print_str("\r\n", 3);
+#endif
+      /* Build and transmit frame with data. Transmit 5 times to increase
+       * the chance of the frame arriving at the receiver without any error.
+       */
+      len = frame_build(frame, FRAMEBUFSIZE, realtemp, rh);
+      for (i = 0; i < 5; ++i) {
+        uart_tx(frame, len);
+        _delay_ms(20);
+      }
+#ifdef ENABLE_SLEEP
+      g_update_flag = 0;
+    }
+#endif
+#ifndef ENABLE_SLEEP
     _delay_ms(3000);
+#endif
   }
 }
 
