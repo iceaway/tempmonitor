@@ -205,7 +205,7 @@ static void handle_data(unsigned char *data, ssize_t len)
           fprintf(templog, "%0.1f;%0.1f\n", (float)temp/10.0f, (float)rh/10.0f);
           fclose(templog);
         } else {
-          printf("Failed to open '%s' for writing data\n", filename);
+          printf("Failed to open '%s' for writing data. Errno = %d\n", filename, errno);
         }
 
       } else {

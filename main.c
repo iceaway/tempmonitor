@@ -51,6 +51,7 @@ void uart_tx(uint8_t *buf, size_t len);
 void uart_tx_single(uint8_t c);
 void print_str(char *str, size_t len);
 void print_dec(int16_t dec);
+static uint8_t get_address(void);
 
 static uint8_t g_seqno = 0;
 static uint8_t g_update_flag = 0;
@@ -107,7 +108,7 @@ static int frame_build(uint8_t *buf, size_t buflen, int16_t temp, uint16_t rh)
 
   buf[i++] = STX;
   buf[i++] = STX;
-  buf[i++] = (g_seqno << 4) | ADDR;
+  buf[i++] = (g_seqno << 4) | (get_address() & 0x0f);
   buf[i++] = TYPE_TRH;
   buf[i++] = (temp & 0xff00) >> 8;
   buf[i++] = (temp & 0x00ff);
@@ -150,6 +151,17 @@ void uart_tx_single(uint8_t c)
 
 }
 
+static uint8_t get_address(void)
+{
+  /* Read the address pins */
+  uint8_t addr;
+  addr = (((PIND & (1 << PIND0)) ? 1 : 0) << 3) |
+         (((PIND & (1 << PIND1)) ? 1 : 0) << 2) |
+         (((PINA & (1 << PINA1)) ? 1 : 0) << 1) |
+         (((PINA & (1 << PINA0)) ? 1 : 0));
+  return addr;
+}
+
 static void gpio_init(void)
 {
   /* Test output pins */
@@ -158,6 +170,22 @@ static void gpio_init(void)
 
   /* Soft uart - RF data*/
   DDRD |= (1 << PD4);
+
+  /* Address pins:
+   * PD0
+   * PD1
+   * PA1
+   * PA0 
+   */
+
+  /* Set pins as input */
+  DDRA &= ~(1 << PA1);
+  DDRA &= ~(1 << PA0);
+  DDRD &= ~(1 << PD0);
+  DDRD &= ~(1 << PD1);
+  /* Enable pull-ups */
+  PORTA |= ((1 << PA0) | (1 << PA1));
+  PORTD |= ((1 << PD0) | (1 << PD1));
 
   /* Disable all pull-ups */
   //MCUCR |= (1 << PUD);
