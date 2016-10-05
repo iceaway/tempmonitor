@@ -12,6 +12,7 @@
 #include "hdc1008.h"
 
 #define ENABLE_SLEEP
+#define TX_INTERVAL       45 /* TX interval in seconds */
 
 #define BAUDRATE 1200
 #define BAUDRATE_CALIBRATION -55
@@ -51,26 +52,26 @@ void uart_tx_single(uint8_t c);
 void print_str(char *str, size_t len);
 void print_dec(int16_t dec);
 
-uint8_t const random_numbers[] PROGMEM = { 2,  28, 6,  1,  10, 30, 14, 21, 14,
-                                           19, 16, 13, 29, 19, 26, 28, 15, 6,
-                                           17, 13, 25, 22, 24, 18, 3,  15, 26,                                        
-                                           25, 17, 5 };
-uint8_t const random_numbers_size PROGMEM = sizeof(random_numbers)/sizeof(random_numbers[0]);
 static uint8_t g_seqno = 0;
 static uint8_t g_update_flag = 0;
 
 ISR(WDT_OVERFLOW_vect)
 {
-  static uint8_t cycles = 0;
-  static uint8_t cyclesidx = 0;
+  static uint8_t cycles = TX_INTERVAL;
 
+  if (cycles-- == 0) {
+    g_update_flag = 1;
+    cycles = TX_INTERVAL;
+  }
+
+#if 0
   if (cycles == 0) {
     g_update_flag = 1;
     cycles = random_numbers[cyclesidx++ % random_numbers_size]; 
   }
 
   --cycles;
-
+#endif
   /* Wake up the CPU */
   //PORTB ^= (1 << PB0);
 
@@ -261,7 +262,7 @@ int main(void)
     }
 #endif
 #ifndef ENABLE_SLEEP
-    _delay_ms(3000);
+    _delay_ms(10000);
 #endif
   }
 }
