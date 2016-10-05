@@ -186,6 +186,10 @@ static void gpio_init(void)
   /* Enable pull-ups */
   PORTA |= ((1 << PA0) | (1 << PA1));
   PORTD |= ((1 << PD0) | (1 << PD1));
+  
+  /* Test mode pin - tx every 3s */
+  DDRD &= ~(1 << PD3);
+  PORTD |= 1 << PD3;
 
   /* Disable all pull-ups */
   //MCUCR |= (1 << PUD);
@@ -230,6 +234,11 @@ char hex2ascii(uint8_t hexval)
   }
 }
 
+static uint8_t get_testmode(void)
+{
+  return (PIND & (1 << PIND3)) ? 1 : 0;
+}
+
 int main(void)
 {
   uint8_t frame[FRAMEBUFSIZE];
@@ -237,11 +246,14 @@ int main(void)
   uint16_t rh = 0;
   size_t len;
   int i;
+  uint8_t testmode = 0;
 
   gpio_init();
   watchdog_init();
   i2c_init();
   power_saving();
+  testmode = get_testmode();
+
 
   /* Enable interrupts globally */
   sei();
@@ -254,20 +266,21 @@ int main(void)
   hdc1008_set_mode(HDC_BOTH);
 
   for (;;) {
-#ifdef ENABLE_SLEEP
-    MCUSR |= (1 << SM0) | (1 << SM1);
-    sleep_enable();
-    sleep_cpu();
-    sleep_disable();
-#endif
-
     //hdc1008_measure_temp(&realtemp);
     //print_str("T:", 2);
     //print_dec(realtemp);
     //print_str("\r\n", 3);
-#ifdef ENABLE_SLEEP
+    if (testmode) {
+      _delay_ms(3000);
+      g_update_flag = 1;
+    } else {
+      MCUSR |= (1 << SM0) | (1 << SM1);
+      sleep_enable();
+      sleep_cpu();
+      sleep_disable();
+    }
+
     if (g_update_flag) {
-#endif
       hdc1008_measure_both(&realtemp, &rh);
       g_seqno = (g_seqno + 1) % 16;
 #if 0
@@ -285,13 +298,8 @@ int main(void)
         uart_tx(frame, len);
         _delay_ms(20);
       }
-#ifdef ENABLE_SLEEP
       g_update_flag = 0;
     }
-#endif
-#ifndef ENABLE_SLEEP
-    _delay_ms(10000);
-#endif
   }
 }
 
