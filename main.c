@@ -17,6 +17,9 @@
 #define BAUDRATE 1200
 #define BAUDRATE_CALIBRATION -55
 
+#define ENABLE_TX_TIMER() TCCR0B |= (1 << CS00)
+#define DISABLE_TX_TIMER() TCCR0B &= ~(1 << CS00)
+
 #define STX 0xAC
 
 #define ADDR          0x01
@@ -47,14 +50,20 @@
 
 static uint8_t crc(uint8_t *buf, size_t buflen);
 static int frame_build(uint8_t *buf, size_t buflen, int16_t temp, uint16_t rh);
-void uart_tx(uint8_t *buf, size_t len);
-void uart_tx_single(uint8_t c);
+static void uart_tx(uint8_t *buf, size_t len);
+static void uart_tx_single(uint8_t c);
+static void tx_manchester(uint8_t *buf, size_t len);
 void print_str(char *str, size_t len);
 void print_dec(int16_t dec);
 static uint8_t get_address(void);
 
 static uint8_t g_seqno = 0;
 static uint8_t g_update_flag = 0;
+static uint8_t g_txbuffer = 0;
+static uint8_t g_bitindex = 0;
+volatile static uint8_t g_nextbit = 0;
+static uint8_t g_bitsleft = 0;
+volatile static uint8_t g_txfinished = 0;
 
 ISR(WDT_OVERFLOW_vect)
 {
@@ -80,14 +89,23 @@ ISR(WDT_OVERFLOW_vect)
 
 ISR(TIMER0_COMPA_vect)
 {
-  //PORTB ^= (1 << PB0);
+  PORTB |= (1 << PB0);
+
+  if (g_nextbit)
+    PORTD |= (1 << PD4);
+  else
+    PORTD &= ~(1 << PD4);
+
+  g_txfinished = 1;
+
+  PORTB &= ~(1 << PB0);
 }
 
 ISR(TIMER0_OVF_vect)
 {
   //PORTB ^= (1 << PB0);
 }
-
+#if 0
 static uint8_t crc(uint8_t *buf, size_t buflen)
 {
   uint8_t crc = 0;
@@ -98,7 +116,9 @@ static uint8_t crc(uint8_t *buf, size_t buflen)
 
   return crc;
 }
+#endif
 
+#if 0
 static int frame_build(uint8_t *buf, size_t buflen, int16_t temp, uint16_t rh)
 {
   int i = 0;
@@ -118,6 +138,74 @@ static int frame_build(uint8_t *buf, size_t buflen, int16_t temp, uint16_t rh)
   ++i;
 
   return i;
+}
+#endif
+
+static void tx_manchester(uint8_t *buf, size_t len)
+{
+  int i;
+  enum state {
+    IDLE,
+    M1,
+    M0,
+  };
+  enum state s = IDLE;
+
+  for (i = 0; i < len; ++i) {
+    /* Make sure output signal is high */
+    PORTD |= 1 << PD4;
+
+    g_bitsleft = 8;
+    g_bitindex = 7;
+    g_txbuffer = buf[i];
+
+    /* Enable timer */
+    TCNT0 = 0;
+    ENABLE_TX_TIMER();
+
+    /* Wait until tx finished before returning */
+    while (g_bitsleft) {
+      g_txfinished = 0;
+      switch (s) {
+      case IDLE:
+        if (g_txbuffer & (1 << g_bitindex)) {
+          //PORTD &= ~(1 << PD4);
+          g_nextbit = 0;
+          s = M1;
+        } else {
+          //PORTD |= 1 << PD4;
+          g_nextbit = 1;
+          s = M0;
+        }
+        break;
+
+      case M1:
+        //PORTD |= 1 << PD4;
+        g_nextbit = 1;
+        s = IDLE;
+        --g_bitsleft;
+        --g_bitindex;
+        break;
+
+      case M0:
+        //PORTD &= ~(1 << PD4);
+        g_nextbit = 0;
+        s = IDLE;
+        --g_bitsleft;
+        --g_bitindex;
+        break;
+      }
+      while (!g_txfinished) { }
+    }
+
+    /* Wait for the last bit to time out */
+    g_txfinished = 0;
+    while (!g_txfinished) { }
+
+    DISABLE_TX_TIMER();
+    /* Make sure output signal is high */
+    PORTD |= 1 << PD4;
+  }
 }
 
 void uart_tx(uint8_t *buf, size_t len)
@@ -168,8 +256,9 @@ static void gpio_init(void)
   DDRB |= (1 << PB0);
   DDRB |= (1 << PB1);
 
-  /* Soft uart - RF data*/
+  /* Soft uart - RF data. Set an output - high */
   DDRD |= (1 << PD4);
+  PORTD |= (1 << PD4);
 
   /* Address pins:
    * PD0
@@ -225,6 +314,7 @@ static void power_saving(void)
   ACSR |= (1 << ACD);
 }
 
+#if 0
 char hex2ascii(uint8_t hexval)
 {
   if (hexval < 0x0A) {
@@ -233,10 +323,26 @@ char hex2ascii(uint8_t hexval)
     return ('A' + (hexval - 0x0A));
   }
 }
+#endif
 
 static uint8_t get_testmode(void)
 {
   return (PIND & (1 << PIND3)) ? 1 : 0;
+}
+
+static void timer_init(void)
+{
+  /* Timer used for manchester encoding of data stream. Each bit frame
+   * is 250 us long.
+   */
+  /* No prescaler. Do not do this here since it enables the timer */
+  //TCCR0B = (1 << CS00);
+
+  /* Enable the interrupt */
+  TIMSK |= (1 << OCIE0A);
+
+  /* Output compare value */
+  OCR0A = 125;
 }
 
 int main(void)
@@ -249,10 +355,11 @@ int main(void)
   uint8_t testmode = 0;
 
   gpio_init();
+  timer_init();
   watchdog_init();
   i2c_init();
   power_saving();
-  testmode = get_testmode();
+  testmode = 1; //get_testmode();
 
 
   /* Enable interrupts globally */
@@ -271,8 +378,10 @@ int main(void)
     //print_dec(realtemp);
     //print_str("\r\n", 3);
     if (testmode) {
-      _delay_ms(3000);
+      _delay_ms(100);
       g_update_flag = 1;
+      frame[0] = 0xAC;
+      tx_manchester(&frame[0], 1);
     } else {
       MCUSR |= (1 << SM0) | (1 << SM1);
       sleep_enable();
@@ -293,11 +402,13 @@ int main(void)
       /* Build and transmit frame with data. Transmit 5 times to increase
        * the chance of the frame arriving at the receiver without any error.
        */
+#if 0
       len = frame_build(frame, FRAMEBUFSIZE, realtemp, rh);
       for (i = 0; i < 5; ++i) {
         uart_tx(frame, len);
         _delay_ms(20);
       }
+#endif
       g_update_flag = 0;
     }
   }
@@ -323,6 +434,7 @@ void print_dec(int16_t dec)
   uart_tx((uint8_t*)buf, len);
 }
 
+#if 0
 void print_hex(uint16_t hex)
 {
   size_t len = 0;
@@ -333,4 +445,4 @@ void print_hex(uint16_t hex)
   buf[len++] = hex2ascii((hex & 0x000f));
   uart_tx((uint8_t*)buf, len);
 }
-
+#endif
