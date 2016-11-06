@@ -21,6 +21,8 @@
 #define DISABLE_TX_TIMER() TCCR0B &= ~(1 << CS00)
 
 #define STX 0xAC
+#define PREAMBLE_1      0xAA
+#define PREAMBLE_2      0xAB
 
 #define ADDR          0x01
 
@@ -39,6 +41,20 @@
  * (1) Sequence number is used so that the receiver can keep track of 
  * missed messages. This could be used to warn if a certain node rarely
  * gets its messages through. Increased by one with each new temp/rh reading.
+ *
+ * Before each messaga a preamble of 0xAAAB is sent to help the receiver sync
+ * the clock of the data stream. 0xAAAB is chosen so that we have a bit value
+ * transition between each bit, which the receiver needs to sync the clock. 
+ * The second preamble byte is different from the first so the receiver
+ * knows when to sync the first byte.
+ * 
+ *                    |  Preamble                         | Data stream
+ * i.e. Bit stream:   |  1 0 1 0 1 0 1 0 1 0 1 0 1 0 1 1  | 1 0 ..... 1
+ *                         ^ Sync (best case)
+ *                                                          ^ Start of data
+ * The receiver will first try to sync the clock, and then look for the bit 
+ * pattern 10101011 to detect the transition from preamble to data.
+ *                                     
  */
 
 /*
@@ -59,11 +75,8 @@ static uint8_t get_address(void);
 
 static uint8_t g_seqno = 0;
 static uint8_t g_update_flag = 0;
-static uint8_t g_txbuffer = 0;
-static uint8_t g_bitindex = 0;
-volatile static uint8_t g_nextbit = 0;
-static uint8_t g_bitsleft = 0;
-volatile static uint8_t g_txfinished = 0;
+static volatile uint8_t g_nextbit = 0;
+static volatile uint8_t g_txfinished = 0;
 
 ISR(WDT_OVERFLOW_vect)
 {
@@ -150,25 +163,29 @@ static void tx_manchester(uint8_t *buf, size_t len)
     M0,
   };
   enum state s = IDLE;
+  uint8_t bitindex;
+  uint8_t bitsleft;
+  uint8_t txbyte;
+
+  /* Make sure output signal is high */
+  PORTD |= 1 << PD4;
+
+  /* Enable timer */
+  TCNT0 = 0;
+  ENABLE_TX_TIMER();
 
   for (i = 0; i < len; ++i) {
-    /* Make sure output signal is high */
-    PORTD |= 1 << PD4;
-
-    g_bitsleft = 8;
-    g_bitindex = 7;
-    g_txbuffer = buf[i];
-
-    /* Enable timer */
-    TCNT0 = 0;
-    ENABLE_TX_TIMER();
+    bitsleft = 8;
+    /* TX MSB first */
+    bitindex = 7;
+    txbyte = buf[i];
 
     /* Wait until tx finished before returning */
-    while (g_bitsleft) {
+    while (bitsleft) {
       g_txfinished = 0;
       switch (s) {
       case IDLE:
-        if (g_txbuffer & (1 << g_bitindex)) {
+        if (txbyte & (1 << bitindex)) {
           //PORTD &= ~(1 << PD4);
           g_nextbit = 0;
           s = M1;
@@ -183,29 +200,29 @@ static void tx_manchester(uint8_t *buf, size_t len)
         //PORTD |= 1 << PD4;
         g_nextbit = 1;
         s = IDLE;
-        --g_bitsleft;
-        --g_bitindex;
+        --bitsleft;
+        --bitindex;
         break;
 
       case M0:
         //PORTD &= ~(1 << PD4);
         g_nextbit = 0;
         s = IDLE;
-        --g_bitsleft;
-        --g_bitindex;
+        --bitsleft;
+        --bitindex;
         break;
       }
       while (!g_txfinished) { }
     }
 
-    /* Wait for the last bit to time out */
-    g_txfinished = 0;
-    while (!g_txfinished) { }
-
-    DISABLE_TX_TIMER();
-    /* Make sure output signal is high */
-    PORTD |= 1 << PD4;
   }
+  /* Wait for the last bit to time out */
+  g_txfinished = 0;
+  while (!g_txfinished) { }
+
+  DISABLE_TX_TIMER();
+  /* Make sure output signal is high */
+  PORTD |= 1 << PD4;
 }
 
 void uart_tx(uint8_t *buf, size_t len)
@@ -378,10 +395,17 @@ int main(void)
     //print_dec(realtemp);
     //print_str("\r\n", 3);
     if (testmode) {
-      _delay_ms(100);
+      _delay_ms(1000);
       g_update_flag = 1;
-      frame[0] = 0xAC;
-      tx_manchester(&frame[0], 1);
+      frame[0] = PREAMBLE_1;
+      frame[1] = PREAMBLE_2;
+      frame[2] = 0x23;
+      //frame[0] = 0x33;
+      //frame[1] = 0x15;
+      //frame[0] = 0x33;
+      //frame[1] = 0x33;
+
+      tx_manchester(&frame[0], 3);
     } else {
       MCUSR |= (1 << SM0) | (1 << SM1);
       sleep_enable();
