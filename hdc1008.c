@@ -117,7 +117,6 @@ int hdc1008_measure_both(int16_t *temp, uint16_t *rh)
   conf_read(&conf);
   if (!(conf & (1 << BITPOS_MODE))) {
     /* Mode is measure NOT both, error */
-    print_str("ERR\r\n", 5);
     return ERROR;
   }
 
@@ -144,7 +143,6 @@ int hdc1008_measure_rh(uint16_t *rh)
   conf_read(&conf);
   if (conf & (1 << BITPOS_MODE)) {
     /* Mode is measure both, error */
-    print_str("ERR\r\n", 5);
     return ERROR;
   }
 
@@ -170,7 +168,6 @@ int hdc1008_measure_temp(int16_t *temp)
   conf_read(&conf);
   if (conf & (1 << BITPOS_MODE)) {
     /* Mode is measure both, error */
-    print_str("ERR\r\n", 5);
     return ERROR;
   }
 
@@ -260,10 +257,12 @@ int hdc1008_get_serialno(uint8_t *serialno)
   buf[1] = 0x00;
   i2c_transfer(buf, 3);
 
-  s1 = (buf[1] << 8) | buf[2];
+  s = (buf[1] << 8) | buf[2];
+#if 0
   print_str("SER:", 4);
   print_hex(s1);
   print_str("\r\n", 2);
+#endif
 
 }
 #endif

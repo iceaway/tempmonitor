@@ -11,13 +11,21 @@
 
 #define MAX_ARGC        8 
 #define PRINTS_BUFSIZE  128
+#define BUFSIZE         64
+
 
 #define PREAMBLE_2      0xAB
+#define STX_BYTE        0xAC
+
+#define MAX_NO_DEVICES  16 
 
 #define ASCII_DEL  0x7F
 #define ASCII_BS   0x08
 
-#define PREAMBLE   0x57
+#define ERR_INVALID_CMD         1
+#define ERR_INVALID_CMDLENGTH   2
+#define ERR_INVALID_ADDR        3
+#define ERR_DEVICE_UNAVAILABLE  4
 
 void color_stack(void) __attribute__ ((naked)) \
        __attribute__ ((section (".init3")));
@@ -26,6 +34,12 @@ struct cmd {
   char const * const cmd;
   char const * const help;
   int (*callback_fn)(int argc, char *argv[]);
+};
+
+struct temprh {
+  int16_t temperature;
+  uint16_t rh;
+  uint8_t valid;
 };
 
 int cmd_time(int argc, char *argv[]);
@@ -44,6 +58,7 @@ static struct rbuf g_rfrxbuf;
 static uint8_t g_echo = 1;
 static uint8_t g_shiftreg = 0;
 static volatile uint16_t g_diff = 0;
+static struct temprh g_temprhcache[MAX_NO_DEVICES];
 
 const struct cmd commands[] = {
   { "time",  "Show current time", cmd_time },
@@ -88,9 +103,9 @@ ISR(TIMER1_COMPA_vect)
 #define US_TO_TICK(us)  ((us)*2)
 #define TICK_TO_US(tick)  ((tick)/2)
 
-/* T on TX end is 260 us, accept +/1 50 us */
-#define LIM_LO  US_TO_TICK(210)
-#define LIM_HI  US_TO_TICK(300)
+/* T on TX end is 260 us, accept +/- 80 us */
+#define LIM_LO  US_TO_TICK(180)
+#define LIM_HI  US_TO_TICK(340)
 
 ISR(TIMER1_OVF_vect)
 {
@@ -118,6 +133,7 @@ ISR(TIMER1_CAPT_vect)
 
   /* Change capture edge */
   TCCR1B ^= _BV(ICES1);
+  //PORTB ^= _BV(PORTB4);
 
   if (g_overflow == 0) {
 
@@ -126,7 +142,7 @@ ISR(TIMER1_CAPT_vect)
       if ((diff >= (LIM_LO*2)) && (diff <= (LIM_HI*2))) {
         s = SYNC;
         g_bitsync = 1;
-        //PORTB |= _BV(PORTB4);
+        PORTB |= _BV(PORTB4);
         bitval = PINB & (1 << PB0);
         g_shiftreg = bitval;
 
@@ -188,7 +204,7 @@ ISR(TIMER1_CAPT_vect)
 
       if (g_bytesync && rxbit) {
         if (bitcnt == 0) {
-          PORTB |= _BV(PORTB4);
+          //PORTB |= _BV(PORTB4);
           rxbyte |= bitval;
         } else if (bitcnt > 0) {
           rxbyte <<= 1;
@@ -199,7 +215,7 @@ ISR(TIMER1_CAPT_vect)
           rbuf_push(&g_rfrxbuf, rxbyte);
           bitcnt = 0;
           rxbyte = 0;
-          PORTB &= ~_BV(PORTB4);
+          //PORTB &= ~_BV(PORTB4);
         } else {
           ++bitcnt;
         }
@@ -311,6 +327,105 @@ static int parse_args(char *buf, char *argv[])
   return argc;
 }
 
+static int hex2int(char c)
+{
+  if ((c >= 'a') && (c <= 'f'))
+    return c - 'a' + 10;
+  else if ((c >= 'A') && (c <= 'F')) 
+    return c - 'A' + 10;
+  else if ((c >= '0') && (c <= '9'))
+    return c - '0';
+  else
+    return -1;
+}
+
+static int parse_cmd_serial_proto(char data)
+{
+  /* 
+   * There are three host commands:
+   * rtX - Read temperature of sensor X (0-F)
+   * rhX - Read relative humidity of sensor X
+   * rbX - Read both tem and RH of sensor X
+   * All commands are terminated with a newline. The response is sent as
+   * rtX: TTT\n
+   * rhX: HHH\n
+   * rbX: TTT;HHH\n
+   * 
+   * A faulty command receives the reply e followed by a two digit error code
+   * ex. e01\n
+   *
+   * Error codes:
+   * 01 - Invalid command
+   * 02 - Invalid command length
+   * 03 - Invalid device address
+   * 04 - Device unavailable
+   */
+  static char buf[8] = { 0 };
+  static unsigned int idx = 0;
+  int device;
+  int ret = 0;
+
+  if (data != '\n') {
+    if (idx < sizeof(buf)) {
+      buf[idx++] = data;
+    }
+  } else {
+    if (idx != 3) {
+      ret = -ERR_INVALID_CMDLENGTH;
+      prints("e%02d;%d\n", ERR_INVALID_CMDLENGTH, idx);
+      idx = 0;
+      goto out;
+    }
+
+    device = hex2int(buf[2]);
+    if ((device < 0) || (device > (MAX_NO_DEVICES-1))) {
+      ret = -ERR_INVALID_ADDR;
+      prints("e%02d\n", ERR_INVALID_ADDR);
+      idx = 0;
+      goto out;
+    }
+
+    if (!g_temprhcache[device].valid) {
+      ret = -ERR_DEVICE_UNAVAILABLE;
+      prints("e%02d%x\n", ERR_DEVICE_UNAVAILABLE, device);
+      idx = 0;
+      goto out;
+    }
+
+    if (buf[0] == 'r') {
+      switch (buf[1]) {
+      case 't':
+        prints("%03d\n", g_temprhcache[device].temperature);
+        break;
+
+      case 'h':
+        prints("%03u\n", g_temprhcache[device].rh);
+        break;
+
+      case 'b':
+        prints("%03d:%03u\n",
+               g_temprhcache[device].temperature,
+               g_temprhcache[device].rh);
+        break;
+
+      default:
+        ret = -ERR_INVALID_CMD;
+        prints("e%02d\n", ERR_INVALID_CMD);
+        break;
+        
+      }
+    } else {
+      ret = -ERR_INVALID_CMD;
+      prints("e%02d\n", ERR_INVALID_CMD);
+    }
+
+    idx = 0;
+  }
+    
+out:
+  return ret;
+}
+
 static int parse_cmd(char data)
 {
   static char buf[RBUF_SIZE];
@@ -363,12 +478,16 @@ static int parse_cmd(char data)
 
 int cmd_freq(int argc, char *argv[])
 {
+  (void)argc;
+  (void)argv;
   prints("Current freq: %u\r\n", g_freq);
   return 0;
 }
 
 int cmd_time(int argc, char *argv[])
 {
+  (void)argc;
+  (void)argv;
   prints("Current time: %lu.%02lu\r\n", g_ticks/100, g_ticks % 100);
   return 0;
 }
@@ -400,6 +519,13 @@ static void init_gpio(void)
   DDRB &= ~(1 << DDB0);
   PORTB |= (1 << PB0);
 
+  /*
+   * PD7 = Mode, shell or serial protocol to host. Pull-up active =>
+   * NC =  Serial protocol
+   * GND = Shell
+   */
+  DDRD &= ~(1 << DDD7); /* Input */
+  PORTD |= (1 << PD7);  /* Pull-up */
 
 #if 0
   /* Set PB5 as output for LED */
@@ -436,13 +562,112 @@ static void init_usart(void)
 
 }
 
+static uint8_t crc(uint8_t *buf, size_t buflen)
+{
+  uint8_t crc = 0;
+  size_t i;
+
+  for (i = 0; i < buflen; ++i)
+    crc ^= buf[i];
+
+  return crc;
+}
+
+static void handle_data(unsigned char *data, int len)
+{
+  int i;
+  static unsigned char buf[BUFSIZE];
+  static unsigned int idx = 0;
+  static int datactr = 0;
+  static int8_t pseqno;
+  static uint8_t seqno;
+  static uint8_t devaddr = 0;
+  uint8_t crc8;
+  int16_t temp;
+  uint16_t rh;
+
+  static enum {
+    STX,
+    ADDR,
+    TYPE,
+    DATA,
+    CRC
+  } state = STX;
+
+
+  for (i = 0; i < len; ++i) {
+    /* Make sure that we don't read more data than fits in the read buffer.
+     * If too many bytes are read we reset the state machine and wait for
+     * another message.
+     */
+    if (idx >= sizeof(buf)) {
+      state = STX;
+      idx = 0;
+    }
+
+    switch (state) {
+    case STX:
+      if (data[i] == STX_BYTE) {
+        memset(&buf, 0, sizeof(buf));
+        buf[idx++] = data[i];
+        state = ADDR;
+      }
+      break;
+
+    case ADDR:
+      buf[idx++] = data[i];
+      seqno = (data[i] & 0xf0) >> 4;
+      devaddr = data[i] & 0x0f;
+      state = TYPE;
+      break;
+
+    case TYPE:
+      buf[idx++] = data[i];
+      datactr = 0;
+      state = DATA;
+      break;
+
+    case DATA:
+      buf[idx++] = data[i];
+      if (++datactr == 4)
+        state = CRC;
+      break;
+
+    case CRC:
+      buf[idx++] = data[i];
+      crc8 = crc(buf, idx-1);
+      if (crc8 == buf[idx-1]) {
+        temp = (buf[3] << 8) | buf[4];
+        rh = (buf[5] << 8) | buf[6];
+        if (seqno != pseqno) {
+          prints("Temperature: %u degC/10, RH = %u%%/10, Seqno = %u (from %u)\r\n", temp, rh, seqno, devaddr);
+          /* Update cached temperature reading */
+          if (devaddr < MAX_NO_DEVICES) {
+            g_temprhcache[devaddr].temperature = temp;
+            g_temprhcache[devaddr].rh = rh;
+            g_temprhcache[devaddr].valid = 1;
+          }
+        }
+        pseqno = seqno;
+       
+      } else {
+        prints("Message CRC failed\r\n");
+      }
+      state = STX;
+      idx = 0;
+      break;
+    }
+  }
+}
+
+static int get_mode(void)
+{
+  return (PIND & (1 << PIND7)) ? 0 : 1;
+}
+
 int main(void)
 {
   char tmp;
-  uint32_t last = 0;
-  uint16_t adcval;
-  uint8_t first = 1;
-  uint16_t lastdiff = 0;
   uint8_t byte = 0;
 
   init_timers();
@@ -453,35 +678,29 @@ int main(void)
   rbuf_init(&g_txbuf);
   rbuf_init(&g_rfrxbuf);
 
+  memset(g_temprhcache, 0, sizeof(g_temprhcache));
 
   /* Enable interrupts globally */
   sei(); 
 
   for (;;) {
     if (rbuf_pop(&g_rxbuf, &tmp)) {
-      echo(tmp);
-      if (tmp == '\r')
-        echo('\n');
-      if (parse_cmd(tmp)) {
-        prints(">> ");
+      if (get_mode()) {
+        /* Shell mode */
+        echo(tmp);
+        if (tmp == '\r')
+          echo('\n');
+        if (parse_cmd(tmp)) {
+          prints(">> ");
+        }
+      } else {
+        /* Serial protocol to host mode */
+        parse_cmd_serial_proto(tmp);
       }
     }
 
-    if (g_bitsync) {
-      if (first) {
-        prints("Sync!\r\n");
-        first = 0;
-      }
-
-      if (g_bytesync) {
-        prints("Got preamble!\r\n");
-      }
-    } else {
-      first = 1;
-    }
-
-    if (rbuf_pop(&g_rfrxbuf, &byte)) {
-      prints("Received: %02x\r\n", byte);
+    while (rbuf_pop(&g_rfrxbuf, &byte)) {
+      handle_data(&byte, 1);
     }
   }
 }

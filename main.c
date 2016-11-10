@@ -20,14 +20,19 @@
 #define ENABLE_TX_TIMER() TCCR0B |= (1 << CS00)
 #define DISABLE_TX_TIMER() TCCR0B &= ~(1 << CS00)
 
-#define STX 0xAC
+#define STX             0xAC
 #define PREAMBLE_1      0xAA
 #define PREAMBLE_2      0xAB
+
+#define NO_RTX        5
 
 #define ADDR          0x01
 
 #define TYPE_TRH      0x01
-#define FRAMEBUFSIZE  9
+#define FRAMEBUFSIZE  10
+
+#define RF_ON()       PORTD |= (1 << PD5)
+#define RF_OFF()      PORTD &= ~(1 << PD5)
 
 /*
  * Message frame format:
@@ -59,9 +64,15 @@
 
 /*
  * HW Connections:
- * TX RF Data - PD4
- * I2C SCL - PB7
- * I2C SDA - PB5
+ * PD4: TX RF Data
+ * PB7: I2C SCL
+ * PB5: I2C SDA
+ * PD3: Test mode
+ * PD5: RF control (on/off)
+ * PD0: Device address
+ * PD1:      ''
+ * PA0:      ''
+ * PA1:      ''
  */
 
 static uint8_t crc(uint8_t *buf, size_t buflen);
@@ -118,7 +129,7 @@ ISR(TIMER0_OVF_vect)
 {
   //PORTB ^= (1 << PB0);
 }
-#if 0
+#if 1
 static uint8_t crc(uint8_t *buf, size_t buflen)
 {
   uint8_t crc = 0;
@@ -131,7 +142,7 @@ static uint8_t crc(uint8_t *buf, size_t buflen)
 }
 #endif
 
-#if 0
+#if 1
 static int frame_build(uint8_t *buf, size_t buflen, int16_t temp, uint16_t rh)
 {
   int i = 0;
@@ -139,7 +150,8 @@ static int frame_build(uint8_t *buf, size_t buflen, int16_t temp, uint16_t rh)
   if (buflen < 9)
     return -1;
 
-  buf[i++] = STX;
+  buf[i++] = PREAMBLE_1;
+  buf[i++] = PREAMBLE_2;
   buf[i++] = STX;
   buf[i++] = (g_seqno << 4) | (get_address() & 0x0f);
   buf[i++] = TYPE_TRH;
@@ -147,7 +159,8 @@ static int frame_build(uint8_t *buf, size_t buflen, int16_t temp, uint16_t rh)
   buf[i++] = (temp & 0x00ff);
   buf[i++] = (rh & 0xff00) >> 8;
   buf[i++] = (rh & 0x00ff);
-  buf[i] = crc(buf, i);
+  /* Skip CRC for the preamble */
+  buf[i] = crc(buf+2, i-2);
   ++i;
 
   return i;
@@ -166,6 +179,11 @@ static void tx_manchester(uint8_t *buf, size_t len)
   uint8_t bitindex;
   uint8_t bitsleft;
   uint8_t txbyte;
+
+  /* Turn on RF circuit */
+  RF_ON();
+  /* Let it stabilize, not sure if we need this or not */
+  _delay_ms(10);
 
   /* Make sure output signal is high */
   PORTD |= 1 << PD4;
@@ -223,15 +241,21 @@ static void tx_manchester(uint8_t *buf, size_t len)
   DISABLE_TX_TIMER();
   /* Make sure output signal is high */
   PORTD |= 1 << PD4;
+  
+  /* Turn of RF unit */
+  RF_OFF();
 }
 
+#if 0
 void uart_tx(uint8_t *buf, size_t len)
 {
   size_t i;
   for (i = 0; i < len; ++i)
     uart_tx_single(buf[i]);
 }
+#endif
 
+#if 0
 void uart_tx_single(uint8_t c)
 {
   uint32_t usecdelay = 1000000/(uint32_t)BAUDRATE+BAUDRATE_CALIBRATION;
@@ -255,15 +279,16 @@ void uart_tx_single(uint8_t c)
   _delay_us(usecdelay);
 
 }
+#endif
 
 static uint8_t get_address(void)
 {
   /* Read the address pins */
   uint8_t addr;
-  addr = (((PIND & (1 << PIND0)) ? 1 : 0) << 3) |
-         (((PIND & (1 << PIND1)) ? 1 : 0) << 2) |
-         (((PINA & (1 << PINA1)) ? 1 : 0) << 1) |
-         (((PINA & (1 << PINA0)) ? 1 : 0));
+  addr = (((PIND & (1 << PIND0)) ? 0 : 1) << 3) |
+         (((PIND & (1 << PIND1)) ? 0 : 1) << 2) |
+         (((PINA & (1 << PINA1)) ? 0 : 1) << 1) |
+         (((PINA & (1 << PINA0)) ? 0 : 1));
   return addr;
 }
 
@@ -277,6 +302,11 @@ static void gpio_init(void)
   DDRD |= (1 << PD4);
   PORTD |= (1 << PD4);
 
+
+  /* Control RF unit on/off via transistor via PD5. High = ON */
+  DDRD |= (1 << PD5);
+  PORTD &= ~(1 << PD5); /* Start low */
+
   /* Address pins:
    * PD0
    * PD1
@@ -285,10 +315,8 @@ static void gpio_init(void)
    */
 
   /* Set pins as input */
-  DDRA &= ~(1 << PA1);
-  DDRA &= ~(1 << PA0);
-  DDRD &= ~(1 << PD0);
-  DDRD &= ~(1 << PD1);
+  DDRA &= ~((1 << PA1) | (1 << PA0));
+  DDRD &= ~((1 << PD0) | (1 << PD1));
   /* Enable pull-ups */
   PORTA |= ((1 << PA0) | (1 << PA1));
   PORTD |= ((1 << PD0) | (1 << PD1));
@@ -344,7 +372,7 @@ char hex2ascii(uint8_t hexval)
 
 static uint8_t get_testmode(void)
 {
-  return (PIND & (1 << PIND3)) ? 1 : 0;
+  return (PIND & (1 << PIND3)) ? 0 : 1;
 }
 
 static void timer_init(void)
@@ -376,7 +404,7 @@ int main(void)
   watchdog_init();
   i2c_init();
   power_saving();
-  testmode = 1; //get_testmode();
+  testmode = get_testmode();
 
 
   /* Enable interrupts globally */
@@ -399,13 +427,19 @@ int main(void)
       g_update_flag = 1;
       frame[0] = PREAMBLE_1;
       frame[1] = PREAMBLE_2;
-      frame[2] = 0x23;
+      frame[2] = 0x21;
+      frame[3] = TYPE_TRH; 
+      frame[4] = (230 & 0xff00) >> 8;
+      frame[5] = (230 & 0x00ff);
+      frame[6] = (400 & 0xff00) >> 8;
+      frame[7] = (400 & 0x00ff);
+      frame[8] = 0xfe;
       //frame[0] = 0x33;
       //frame[1] = 0x15;
       //frame[0] = 0x33;
       //frame[1] = 0x33;
 
-      tx_manchester(&frame[0], 3);
+      //tx_manchester(&frame[0], 9);
     } else {
       MCUSR |= (1 << SM0) | (1 << SM1);
       sleep_enable();
@@ -426,10 +460,10 @@ int main(void)
       /* Build and transmit frame with data. Transmit 5 times to increase
        * the chance of the frame arriving at the receiver without any error.
        */
-#if 0
+#if 1
       len = frame_build(frame, FRAMEBUFSIZE, realtemp, rh);
-      for (i = 0; i < 5; ++i) {
-        uart_tx(frame, len);
+      for (i = 0; i < NO_RTX; ++i) {
+        tx_manchester(frame, len);
         _delay_ms(20);
       }
 #endif
@@ -438,11 +472,14 @@ int main(void)
   }
 }
 
+#if 0
 void print_str(char *str, size_t len)
 {
   uart_tx((uint8_t*)str, len);
 }
+#endif
 
+#if 0
 void print_dec(int16_t dec)
 {
   int h, d, s;
@@ -457,6 +494,7 @@ void print_dec(int16_t dec)
   buf[len++] = '0' + s;
   uart_tx((uint8_t*)buf, len);
 }
+#endif
 
 #if 0
 void print_hex(uint16_t hex)
