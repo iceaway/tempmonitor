@@ -27,6 +27,8 @@
 #define ERR_INVALID_ADDR        3
 #define ERR_DEVICE_UNAVAILABLE  4
 
+#define ABS(x)        ((x) < 0) ? (-(x)) : (x)
+
 void color_stack(void) __attribute__ ((naked)) \
        __attribute__ ((section (".init3")));
 
@@ -395,17 +397,28 @@ static int parse_cmd_serial_proto(char data)
     if (buf[0] == 'r') {
       switch (buf[1]) {
       case 't':
-        prints("%03d\n", g_temprhcache[device].temperature);
+        prints("%d.%d\n",
+               g_temprhcache[device].temperature / 10,
+               g_temprhcache[device].temperature < 0 ?
+               (-g_temprhcache[device].temperature) % 10 :
+               g_temprhcache[device].temperature % 10);
+
         break;
 
       case 'h':
-        prints("%03u\n", g_temprhcache[device].rh);
+        prints("%u.%u\n",
+               g_temprhcache[device].rh / 10,
+               g_temprhcache[device].rh % 10);
         break;
 
       case 'b':
-        prints("%03d:%03u\n",
-               g_temprhcache[device].temperature,
-               g_temprhcache[device].rh);
+        prints("%d.%d;%u.%u\n",
+               g_temprhcache[device].temperature / 10,
+               g_temprhcache[device].temperature < 0 ?
+                 (-g_temprhcache[device].temperature) % 10 :
+                 g_temprhcache[device].temperature % 10,
+               g_temprhcache[device].rh / 10,
+               g_temprhcache[device].rh % 10);
         break;
 
       default:
@@ -640,7 +653,15 @@ static void handle_data(unsigned char *data, int len)
         temp = (buf[3] << 8) | buf[4];
         rh = (buf[5] << 8) | buf[6];
         if (seqno != pseqno) {
-          prints("Temperature: %u degC/10, RH = %u%%/10, Seqno = %u (from %u)\r\n", temp, rh, seqno, devaddr);
+#ifdef LOUD
+          prints("Temperature: %d.%d degC/10, RH = %u.%u%%, Seqno = %u (from %u)\r\n",
+                 temp / 10,
+                 temp < 0 ? (-temp) % 10 : temp % 10,
+                 rh / 10,
+                 rh % 10,
+                 seqno,
+                 devaddr);
+#endif
           /* Update cached temperature reading */
           if (devaddr < MAX_NO_DEVICES) {
             g_temprhcache[devaddr].temperature = temp;
@@ -651,7 +672,9 @@ static void handle_data(unsigned char *data, int len)
         pseqno = seqno;
        
       } else {
+#ifdef LOUD
         prints("Message CRC failed\r\n");
+#endif
       }
       state = STX;
       idx = 0;
