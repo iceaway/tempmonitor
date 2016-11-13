@@ -461,7 +461,6 @@ int main(void)
        * the chance of the frame arriving at the receiver without any error.
        */
 #if 1
-      realtemp = -223;
       len = frame_build(frame, FRAMEBUFSIZE, realtemp, rh);
       for (i = 0; i < NO_RTX; ++i) {
         tx_manchester(frame, len);

@@ -6,13 +6,11 @@
 #include <string.h>
 #include "rbuf.h"
 
-#define IS_INPUT(ddr, bit)  ((ddr) & (1 << (bit)) ? 0 : 1)
-#define IS_OUTPUT(ddr, bit)  ((ddr) & (1 << (bit)) ? 1 : 0)
-
 #define MAX_ARGC        8 
 #define PRINTS_BUFSIZE  128
 #define BUFSIZE         64
 
+//#define LOUD
 
 #define PREAMBLE_2      0xAB
 #define STX_BYTE        0xAC
@@ -39,6 +37,7 @@ struct cmd {
 };
 
 struct temprh {
+  uint32_t last_update;
   int16_t temperature;
   uint16_t rh;
   uint8_t valid;
@@ -49,7 +48,7 @@ int cmd_freq(int argc, char *argv[]);
 
 extern uint8_t _end;
 extern uint8_t __stack;
-static uint32_t g_ticks = 0;
+static volatile uint32_t g_ticks = 0;
 static volatile uint8_t g_bitsync = 0;
 static volatile uint8_t g_bytesync = 0;
 static uint32_t g_freq;
@@ -88,20 +87,6 @@ ISR(TIMER0_OVF_vect)
   //PORTB ^= _BV(PORTB4);
 }
 
-/* TIMER1 ISR: Tick counter. Executed every 10 ms */
-ISR(TIMER1_COMPA_vect)
-{
-  ++g_ticks;
-
-  if ((g_ticks % 50) == 0) {
-    PORTB ^= _BV(PORTB5);
-  }
-
-  //PORTB ^= _BV(PORTB4);
-
-  //sched_update(g_ticks);
-
-}
 #define US_TO_TICK(us)  ((us)*2)
 #define TICK_TO_US(tick)  ((tick)/2)
 
@@ -144,7 +129,7 @@ ISR(TIMER1_CAPT_vect)
       if ((diff >= (LIM_LO*2)) && (diff <= (LIM_HI*2))) {
         s = SYNC;
         g_bitsync = 1;
-        PORTB |= _BV(PORTB4);
+        //PORTB |= _BV(PORTB4);
         bitval = PINB & (1 << PB0);
         g_shiftreg = bitval;
 
@@ -182,7 +167,7 @@ ISR(TIMER1_CAPT_vect)
           s = IDLE;
           g_bitsync = 0;
           g_bytesync = 0;
-          PORTB &= ~_BV(PORTB4);
+          //PORTB &= ~_BV(PORTB4);
           break;
         }
 
@@ -201,7 +186,7 @@ ISR(TIMER1_CAPT_vect)
         g_shiftreg = 0;
         g_bitsync = 0;
         g_bytesync = 0;
-        PORTB &= ~_BV(PORTB4);
+        //PORTB &= ~_BV(PORTB4);
       }
 
       if (g_bytesync && rxbit) {
@@ -236,13 +221,8 @@ ISR(TIMER1_CAPT_vect)
     g_bytesync = 0;
     s = IDLE;
     g_shiftreg = 0;
-    PORTB &= ~_BV(PORTB4);
+    //PORTB &= ~_BV(PORTB4);
   }
-#if 0
-  lastcnt = ICR1;
-  g_freq = 2000000/lastcnt;
-#endif
-  //PORTB ^= _BV(PORTB4);
 }
 
 ISR(USART_UDRE_vect)
@@ -263,6 +243,14 @@ ISR(USART_RX_vect)
   tmp = UDR0;
   //UDR0 = tmp; /* Echo */
   rbuf_push(&g_rxbuf, tmp);
+}
+
+ISR(TIMER0_COMPA_vect)
+{
+  ++g_ticks;
+  PORTB ^= _BV(PORTB4);
+  if ((g_ticks % 500) == 0)
+    PORTB ^= _BV(PORTB5);
 }
 
 static void print_char(char data)
@@ -348,10 +336,13 @@ static int parse_cmd_serial_proto(char data)
    * rtX - Read temperature of sensor X (0-F)
    * rhX - Read relative humidity of sensor X
    * rbX - Read both tem and RH of sensor X
+   * rxX - Read both temp and RH of sensor X, also send time since last
+   *       time temp/rh from the current sensor was read in seconds
    * All commands are terminated with a newline. The response is sent as
    * rtX: TTT\n
    * rhX: HHH\n
    * rbX: TTT;HHH\n
+   * rxX: TTT;HHH;TTT\n
    * 
    * A faulty command receives the reply e followed by a two digit error code
    * ex. e01\n
@@ -419,6 +410,17 @@ static int parse_cmd_serial_proto(char data)
                  g_temprhcache[device].temperature % 10,
                g_temprhcache[device].rh / 10,
                g_temprhcache[device].rh % 10);
+        break;
+
+      case 'x':
+        prints("%d.%d;%u.%u;%u\n",
+               g_temprhcache[device].temperature / 10,
+               g_temprhcache[device].temperature < 0 ?
+                 (-g_temprhcache[device].temperature) % 10 :
+                 g_temprhcache[device].temperature % 10,
+               g_temprhcache[device].rh / 10,
+               g_temprhcache[device].rh % 10,
+               (g_ticks - g_temprhcache[device].last_update) / 500);
         break;
 
       default:
@@ -501,7 +503,8 @@ int cmd_time(int argc, char *argv[])
 {
   (void)argc;
   (void)argv;
-  prints("Current time: %lu.%02lu\r\n", g_ticks/100, g_ticks % 100);
+  prints("Current time: %lu.%02lu\r\n", g_ticks/500, g_ticks % 500);
+  prints("sizeof(rh) = %d\n", sizeof(struct temprh));
   return 0;
 }
 
@@ -510,17 +513,25 @@ static void init_timers(void)
   /* CTC mode for ICP, prescaler = clk / 8 => 0.5 us per timer step  */
   TCCR1B = (1 << CS11);
 
-  /* Set up the IPC for manchester decoding */
+  /* Set up the ICP for manchester decoding */
   /* Enable Input Capture interrupt */
   TIMSK1 = (1 << ICIE1) | (1 << TOIE1);
 
+  /* 
+   * Set up system tick. OCR0A = 125 and prescaler /256 gives a systick of 
+   * 2 ms 
+   */
+   
+  TCNT0 = 0;
+  OCR0A = 125;
+  /* Enable Output Compare A interrupt */
+  TIMSK0 = (1 << OCIE0A);
 
-#if 0
-  /* Enable overflow interrupt */
-  TIMSK0 = (1 << TOIE0);
+  /* CTC mode */
+  TCCR0A = (1 << WGM01);
 
-  TCCR0B = (1 << CS01);
-#endif
+  /* Prescaler = f_cpu / 256 */
+  TCCR0B = (1 << CS02);
 }
 
 static void init_gpio(void)
@@ -536,6 +547,7 @@ static void init_gpio(void)
    * PD7 = Mode, shell or serial protocol to host. Pull-up active =>
    * NC =  Serial protocol
    * GND = Shell
+   * PD7 = Digital Pin 7
    */
   DDRD &= ~(1 << DDD7); /* Input */
   PORTD |= (1 << PD7);  /* Pull-up */
@@ -654,7 +666,7 @@ static void handle_data(unsigned char *data, int len)
         rh = (buf[5] << 8) | buf[6];
         if (seqno != pseqno) {
 #ifdef LOUD
-          prints("Temperature: %d.%d degC/10, RH = %u.%u%%, Seqno = %u (from %u)\r\n",
+          prints("Temperature: %d.%d degC, RH = %u.%u%%, Seqno = %u (from %u)\r\n",
                  temp / 10,
                  temp < 0 ? (-temp) % 10 : temp % 10,
                  rh / 10,
@@ -666,6 +678,7 @@ static void handle_data(unsigned char *data, int len)
           if (devaddr < MAX_NO_DEVICES) {
             g_temprhcache[devaddr].temperature = temp;
             g_temprhcache[devaddr].rh = rh;
+            g_temprhcache[devaddr].last_update = g_ticks;
             g_temprhcache[devaddr].valid = 1;
           }
         }
@@ -696,6 +709,7 @@ int main(void)
   init_timers();
   init_gpio();
   init_usart();
+  prints("reset\r\n");
 
   rbuf_init(&g_rxbuf);
   rbuf_init(&g_txbuf);

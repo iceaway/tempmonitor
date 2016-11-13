@@ -6,5 +6,7 @@ Improve I2C-code
 
 
 General
-- Manchester encode outgoing data
-- Create arduino receiver
+- Add timestamp to arduino host to all reads
+- Make arduino NOT reset when opening serial line?
+- Measure current consumption of temp nodes
+- Clean up code and comment
