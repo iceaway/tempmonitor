@@ -204,18 +204,15 @@ static void tx_manchester(uint8_t *buf, size_t len)
       switch (s) {
       case IDLE:
         if (txbyte & (1 << bitindex)) {
-          //PORTD &= ~(1 << PD4);
           g_nextbit = 0;
           s = M1;
         } else {
-          //PORTD |= 1 << PD4;
           g_nextbit = 1;
           s = M0;
         }
         break;
 
       case M1:
-        //PORTD |= 1 << PD4;
         g_nextbit = 1;
         s = IDLE;
         --bitsleft;
@@ -223,7 +220,6 @@ static void tx_manchester(uint8_t *buf, size_t len)
         break;
 
       case M0:
-        //PORTD &= ~(1 << PD4);
         g_nextbit = 0;
         s = IDLE;
         --bitsleft;
@@ -295,8 +291,8 @@ static uint8_t get_address(void)
 static void gpio_init(void)
 {
   /* Test output pins */
-  DDRB |= (1 << PB0);
-  DDRB |= (1 << PB1);
+  //DDRB |= (1 << PB0);
+  //DDRB |= (1 << PB1);
 
   /* Soft uart - RF data. Set an output - high */
   DDRD |= (1 << PD4);
@@ -448,19 +444,12 @@ int main(void)
     }
 
     if (g_update_flag) {
+#if 1
       hdc1008_measure_both(&realtemp, &rh);
       g_seqno = (g_seqno + 1) % 16;
-#if 0
-      print_str("H:", 2);
-      print_dec(rh);
-      print_str(",T:", 3);
-      print_dec(realtemp);
-      print_str("\r\n", 3);
-#endif
       /* Build and transmit frame with data. Transmit 5 times to increase
        * the chance of the frame arriving at the receiver without any error.
        */
-#if 1
       len = frame_build(frame, FRAMEBUFSIZE, realtemp, rh);
       for (i = 0; i < NO_RTX; ++i) {
         tx_manchester(frame, len);
