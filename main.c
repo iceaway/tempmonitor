@@ -11,11 +11,7 @@
 #include "i2c.h"
 #include "hdc1008.h"
 
-#define ENABLE_SLEEP
 #define TX_INTERVAL       45 /* TX interval in seconds */
-
-#define BAUDRATE 1200
-#define BAUDRATE_CALIBRATION -55
 
 #define ENABLE_TX_TIMER() TCCR0B |= (1 << CS00)
 #define DISABLE_TX_TIMER() TCCR0B &= ~(1 << CS00)
@@ -25,8 +21,6 @@
 #define PREAMBLE_2      0xAB
 
 #define NO_RTX        5
-
-#define ADDR          0x01
 
 #define TYPE_TRH      0x01
 #define FRAMEBUFSIZE  10
@@ -77,43 +71,54 @@
 
 static uint8_t crc(uint8_t *buf, size_t buflen);
 static int frame_build(uint8_t *buf, size_t buflen, int16_t temp, uint16_t rh);
-static void uart_tx(uint8_t *buf, size_t len);
-static void uart_tx_single(uint8_t c);
-static void tx_manchester(uint8_t *buf, size_t len);
-void print_str(char *str, size_t len);
-void print_dec(int16_t dec);
+static void rf_tx(uint8_t *buf, size_t len);
 static uint8_t get_address(void);
 
 static uint8_t g_seqno = 0;
-static uint8_t g_update_flag = 0;
+static volatile uint8_t g_measure = 0;
+static volatile uint8_t g_transmit = 0;
 static volatile uint8_t g_nextbit = 0;
 static volatile uint8_t g_txfinished = 0;
 
 ISR(WDT_OVERFLOW_vect)
 {
+  enum state {
+    WAIT,
+    TRANSMIT
+  };
+  static enum state s = WAIT;
+  static uint8_t rtx = 0;
   static uint8_t cycles = TX_INTERVAL;
+  
+  switch (s) {
+  case WAIT:
+    if (cycles-- == 0) {
+      s = TRANSMIT;
+      g_measure = 1;
+      g_seqno = (g_seqno + 1) % 16;
+      rtx = NO_RTX;
+    }
+    break;
 
-  if (cycles-- == 0) {
-    g_update_flag = 1;
+  case TRANSMIT:
+    if (rtx-- == 0) {
+      cycles = TX_INTERVAL;
+      s = WAIT;
+    } else {
+      g_transmit = 1;
+    }
+    break;
+
+  default:
     cycles = TX_INTERVAL;
+    s = WAIT;
+    break;
   }
-
-#if 0
-  if (cycles == 0) {
-    g_update_flag = 1;
-    cycles = random_numbers[cyclesidx++ % random_numbers_size]; 
-  }
-
-  --cycles;
-#endif
-  /* Wake up the CPU */
-  //PORTB ^= (1 << PB0);
-
 }
 
 ISR(TIMER0_COMPA_vect)
 {
-  PORTB |= (1 << PB0);
+  //PORTB |= (1 << PB0);
 
   if (g_nextbit)
     PORTD |= (1 << PD4);
@@ -122,14 +127,14 @@ ISR(TIMER0_COMPA_vect)
 
   g_txfinished = 1;
 
-  PORTB &= ~(1 << PB0);
+  //PORTB &= ~(1 << PB0);
 }
 
 ISR(TIMER0_OVF_vect)
 {
   //PORTB ^= (1 << PB0);
 }
-#if 1
+
 static uint8_t crc(uint8_t *buf, size_t buflen)
 {
   uint8_t crc = 0;
@@ -140,9 +145,7 @@ static uint8_t crc(uint8_t *buf, size_t buflen)
 
   return crc;
 }
-#endif
 
-#if 1
 static int frame_build(uint8_t *buf, size_t buflen, int16_t temp, uint16_t rh)
 {
   int i = 0;
@@ -165,11 +168,10 @@ static int frame_build(uint8_t *buf, size_t buflen, int16_t temp, uint16_t rh)
 
   return i;
 }
-#endif
 
-static void tx_manchester(uint8_t *buf, size_t len)
+static void rf_tx(uint8_t *buf, size_t len)
 {
-  int i;
+  size_t i;
   enum state {
     IDLE,
     M1,
@@ -183,7 +185,7 @@ static void tx_manchester(uint8_t *buf, size_t len)
   /* Turn on RF circuit */
   RF_ON();
   /* Let it stabilize, not sure if we need this or not */
-  _delay_ms(10);
+  _delay_ms(5);
 
   /* Make sure output signal is high */
   PORTD |= 1 << PD4;
@@ -242,41 +244,6 @@ static void tx_manchester(uint8_t *buf, size_t len)
   RF_OFF();
 }
 
-#if 0
-void uart_tx(uint8_t *buf, size_t len)
-{
-  size_t i;
-  for (i = 0; i < len; ++i)
-    uart_tx_single(buf[i]);
-}
-#endif
-
-#if 0
-void uart_tx_single(uint8_t c)
-{
-  uint32_t usecdelay = 1000000/(uint32_t)BAUDRATE+BAUDRATE_CALIBRATION;
-  int i;
-
-  /* Start bit */
-  PORTD &= ~(1 << PD4);
-  _delay_us(usecdelay);
-
-  for (i = 0; i < 8; ++i) {
-    if (c & (1 << i))
-      PORTD |= (1 << PD4);
-    else
-      PORTD &= ~(1 << PD4);
-  
-    _delay_us(usecdelay);
-  }
-
-  /* Stop bit */
-  PORTD |= (1 << PD4);
-  _delay_us(usecdelay);
-
-}
-#endif
-
 static uint8_t get_address(void)
 {
   /* Read the address pins */
@@ -320,9 +287,6 @@ static void gpio_init(void)
   /* Test mode pin - tx every 3s */
   DDRD &= ~(1 << PD3);
   PORTD |= 1 << PD3;
-
-  /* Disable all pull-ups */
-  //MCUCR |= (1 << PUD);
 }
 
 static void watchdog_init(void)
@@ -353,18 +317,10 @@ static void power_saving(void)
 {
   /* Power down analog comparator to reduce power consumption */
   ACSR |= (1 << ACD);
-}
 
-#if 0
-char hex2ascii(uint8_t hexval)
-{
-  if (hexval < 0x0A) {
-    return ('0' + hexval);
-  } else {
-    return ('A' + (hexval - 0x0A));
-  }
+  /* Disable input buffers on analog pins */
+  DIDR |= (1 << AIN1D) | (1 << AIN0D);
 }
-#endif
 
 static uint8_t get_testmode(void)
 {
@@ -392,7 +348,6 @@ int main(void)
   int16_t realtemp = 0;
   uint16_t rh = 0;
   size_t len;
-  int i;
   uint8_t testmode = 0;
 
   gpio_init();
@@ -407,20 +362,19 @@ int main(void)
   sei();
 
   /* Configure HDC1008 */
-  //hdc1008_set_address(0x40);
-  //hdc1008_set_resolution_temp(RES_14_BIT);
-  //hdc1008_set_resolution_rh(RES_14_BIT);
-  //hdc1008_heater(0);
+#ifdef CONFIGURE_HDC1008
+  hdc1008_set_address(0x40);
+  hdc1008_set_resolution_temp(RES_14_BIT);
+  hdc1008_set_resolution_rh(RES_14_BIT);
+  hdc1008_heater(0);
+#endif
   hdc1008_set_mode(HDC_BOTH);
 
   for (;;) {
-    //hdc1008_measure_temp(&realtemp);
-    //print_str("T:", 2);
-    //print_dec(realtemp);
-    //print_str("\r\n", 3);
     if (testmode) {
       _delay_ms(1000);
-      g_update_flag = 1;
+      g_measure = 1;
+      g_transmit = 1;
       frame[0] = PREAMBLE_1;
       frame[1] = PREAMBLE_2;
       frame[2] = 0x21;
@@ -430,70 +384,38 @@ int main(void)
       frame[6] = (400 & 0xff00) >> 8;
       frame[7] = (400 & 0x00ff);
       frame[8] = 0xfe;
-      //frame[0] = 0x33;
-      //frame[1] = 0x15;
-      //frame[0] = 0x33;
-      //frame[1] = 0x33;
-
-      //tx_manchester(&frame[0], 9);
     } else {
-      MCUSR |= (1 << SM0) | (1 << SM1);
+      /* 
+       * When going to sleep all pins should be inputs to reduce power
+       * consumption.
+       * Output pins are:
+       * PD4 - RF output
+       * PD5 - RF circuit on/off
+       */
+      DDRD &= ~(1 << PD4);
+      DDRD &= ~(1 << PD5);
+
+      set_sleep_mode(SLEEP_MODE_PWR_DOWN);
       sleep_enable();
       sleep_cpu();
       sleep_disable();
+
+      /* Set PD4 and PD5 as outputs again */
+      DDRD |= (1 << PD4);
+      DDRD |= (1 << PD5);
     }
 
-    if (g_update_flag) {
-#if 1
+    if (g_measure) {
       hdc1008_measure_both(&realtemp, &rh);
-      g_seqno = (g_seqno + 1) % 16;
-      /* Build and transmit frame with data. Transmit 5 times to increase
-       * the chance of the frame arriving at the receiver without any error.
-       */
+      g_measure = 0;
+    }
+
+    if (g_transmit) {
+      /* Build and transmit frame with data. */
       len = frame_build(frame, FRAMEBUFSIZE, realtemp, rh);
-      for (i = 0; i < NO_RTX; ++i) {
-        tx_manchester(frame, len);
-        _delay_ms(20);
-      }
-#endif
-      g_update_flag = 0;
+      rf_tx(frame, len);
+      g_transmit = 0;
     }
   }
 }
 
-#if 0
-void print_str(char *str, size_t len)
-{
-  uart_tx((uint8_t*)str, len);
-}
-#endif
-
-#if 0
-void print_dec(int16_t dec)
-{
-  int h, d, s;
-  size_t len = 0;
-  char buf[4];
-
-  h = dec / 100;
-  buf[len++] = '0' + h;
-  d = (dec - h * 100) / 10;
-  buf[len++] = '0' + d;
-  s = (dec - h * 100 - d * 10);
-  buf[len++] = '0' + s;
-  uart_tx((uint8_t*)buf, len);
-}
-#endif
-
-#if 0
-void print_hex(uint16_t hex)
-{
-  size_t len = 0;
-  char buf[4];
-  buf[len++] = hex2ascii((hex & 0xf000) >> 12);
-  buf[len++] = hex2ascii((hex & 0x0f00) >> 8);
-  buf[len++] = hex2ascii((hex & 0x00f0) >> 4);
-  buf[len++] = hex2ascii((hex & 0x000f));
-  uart_tx((uint8_t*)buf, len);
-}
-#endif

@@ -127,7 +127,6 @@ static uint8_t i2c_exchange(uint8_t rw)
 int i2c_transfer(uint8_t *buf, uint8_t len)
 {
   int readmode = 0;
-  uint8_t tmp;
   int ret = 0;
   uint8_t idx = 0;
 
