@@ -245,6 +245,7 @@ static void rf_tx(uint8_t *buf, size_t len)
   /* Make sure output signal is high */
   PORTD |= 1 << PD4;
   
+  _delay_us(100);
   /* Turn of RF unit */
   RF_OFF();
 }
@@ -377,9 +378,10 @@ int main(void)
 
   for (;;) {
     if (testmode) {
-      //_delay_ms(1000);
+      _delay_ms(1000);
       g_measure = 1;
-      g_transmit = 0;
+      g_transmit = 1;
+      g_seqno = (g_seqno + 1) % 16;
       frame[0] = PREAMBLE_1;
       frame[1] = PREAMBLE_2;
       frame[2] = 0x21;
