@@ -38,13 +38,14 @@ struct cmd {
 
 struct temprh {
   uint32_t last_update;
-  int16_t temperature;
+  uint32_t timeouts;
   uint16_t rh;
+  int16_t temperature;
   uint8_t valid;
 };
 
 int cmd_time(int argc, char *argv[]);
-int cmd_freq(int argc, char *argv[]);
+int cmd_sens(int argc, char *argv[]);
 
 extern uint8_t _end;
 extern uint8_t __stack;
@@ -63,7 +64,7 @@ static struct temprh g_temprhcache[MAX_NO_DEVICES];
 
 const struct cmd commands[] = {
   { "time",  "Show current time", cmd_time },
-  { "freq",  "Show current frequency at pin 12", cmd_freq },
+  { "sens",  "Sensor information", cmd_sens },
   { NULL, NULL, NULL }
 };
 
@@ -491,11 +492,42 @@ static int parse_cmd(char data)
   return ret; 
 }
 
-int cmd_freq(int argc, char *argv[])
+int cmd_sens(int argc, char *argv[])
 {
-  (void)argc;
-  (void)argv;
-  prints("Current freq: %u\r\n", g_freq);
+  unsigned long id;
+  int16_t temp;
+  uint16_t rh;
+  
+  if (argc <= 1) {
+    prints("usage: sens <show/clear> <id (0-15)>\r\n");
+  } else if (argc >= 3) {
+    if (strncmp(argv[1], "show", 4) == 0) {
+      id = strtoul(argv[2], NULL, 10);
+      if (id <= 15) {
+        temp = g_temprhcache[id].temperature;
+        rh = g_temprhcache[id].rh;
+        prints("Sensor %lu\r\n", id);
+        prints("        Valid: %s\r\n", g_temprhcache[id].valid ? "Yes" : "No");
+        prints("  Temperature: %d.%d\r\n", 
+               temp / 10,
+               temp < 0 ? (-temp) % 10 : temp % 10);
+        prints("           RH: %u.%u%%\r\n",
+               rh / 10, rh % 10);          
+        prints("  Last update: %lu s ago\r\n",
+               (g_ticks - g_temprhcache[id].last_update) / 500);  
+        prints("     Timeouts: %lu\r\n", g_temprhcache[id].timeouts);
+               
+      } else {
+        /* Show all sensor info */
+      }
+    } else if (strncmp(argv[1], "clear", 5)) {
+    } else {
+      prints("Invalid command: '%s'\r\n", argv[2]);
+    }
+  } else {
+    prints("Not enough arguments\r\n");
+  }
+
   return 0;
 }
 
@@ -504,7 +536,6 @@ int cmd_time(int argc, char *argv[])
   (void)argc;
   (void)argv;
   prints("Current time: %lu.%02lu\r\n", g_ticks/500, g_ticks % 500);
-  prints("sizeof(rh) = %d\n", sizeof(struct temprh));
   return 0;
 }
 
@@ -705,11 +736,11 @@ int main(void)
 {
   char tmp;
   uint8_t byte = 0;
+  int i;
 
   init_timers();
   init_gpio();
   init_usart();
-  prints("reset\r\n");
 
   rbuf_init(&g_rxbuf);
   rbuf_init(&g_txbuf);
@@ -738,6 +769,19 @@ int main(void)
 
     while (rbuf_pop(&g_rfrxbuf, &byte)) {
       handle_data(&byte, 1);
+    }
+
+    /* Invalidate devices which have been silent for 10 mins or more */
+    for (i = 0; i < MAX_NO_DEVICES; ++i) {
+      if (((g_ticks - g_temprhcache[i].last_update) / 500) > 600) {
+        g_temprhcache[i].valid = 0;
+      }
+
+      /*
+      if (((g_ticks - g_temprhcache[i].last_update) / 500) > 65) {
+        ++g_temprhcache[i].timeouts;
+      }
+      */
     }
   }
 }

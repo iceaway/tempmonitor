@@ -13,9 +13,6 @@ ${BIN}.elf: ${OBJS}
 	${CC} -o $@ $^ ${CFLAGS}
 
 install: ${BIN}.hex
-	#avrdude -v -p atmega2560 -c arduino -P ${PORT} -b 115200 -U flash:w:$<
-	#avrdude -v -q -D -p t2313 -P ${PORT} -c usbtiny -b 115200 -U flash:w:$<
-	#avrdude -v -q -p t2313 -P ${PORT} -c usbtiny -e -U flash:w:$<
 	avrdude -q -p t2313 -c usbtiny -e -U flash:w:$<
 
 clean:

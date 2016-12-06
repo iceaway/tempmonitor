@@ -6,7 +6,11 @@ Improve I2C-code
 
 
 General
-- Add timestamp to arduino host to all reads
 - Make arduino NOT reset when opening serial line?
 - Measure current consumption of temp nodes
 - Clean up code and comment
+- Add field with battery status for all messages?
+- Add message type for nodes with temp measurement only
+- Port code to ATTiny84A for both temp only and temp + rh
+- Create schema/pcb in KiCad
+

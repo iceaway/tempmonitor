@@ -11,10 +11,14 @@
 #include "i2c.h"
 #include "hdc1008.h"
 
-#define TX_INTERVAL       45 /* TX interval in seconds */
+/* TX interval in x8 seconds, i.e. 16 => 8*16 = 128 s.
+ * There is no need to update the temperature more often than once every 128s
+ * and we want to reserve battery power so long delays are a plus.
+ */
+#define TX_INTERVAL       16 
 
-#define ENABLE_TX_TIMER() TCCR0B |= (1 << CS00)
-#define DISABLE_TX_TIMER() TCCR0B &= ~(1 << CS00)
+#define ENABLE_TX_TIMER()   TCCR0B |= (1 << CS00)
+#define DISABLE_TX_TIMER()  TCCR0B &= ~(1 << CS00)
 
 #define STX             0xAC
 #define PREAMBLE_1      0xAA
@@ -23,6 +27,7 @@
 #define NO_RTX        5
 
 #define TYPE_TRH      0x01
+#define TYPE_T        0x02
 #define FRAMEBUFSIZE  10
 
 #define RF_ON()       PORTD |= (1 << PD5)
@@ -185,7 +190,7 @@ static void rf_tx(uint8_t *buf, size_t len)
   /* Turn on RF circuit */
   RF_ON();
   /* Let it stabilize, not sure if we need this or not */
-  _delay_ms(5);
+  _delay_ms(1);
 
   /* Make sure output signal is high */
   PORTD |= 1 << PD4;
@@ -306,11 +311,11 @@ static void watchdog_init(void)
   WDTCSR |= (1 << WDCE);
 
   /* 
-   * Set prescaler to timeout every 1 s. When waking up wait a random number 
-   * of timeouts before transmitting, to avoid colliding with other nodes
-   * tranmitting data.
+   * Set prescaler to timeout every 8 s. When waking up we check if it is
+   * time to transit, otherwise we go back to sleep for another 8s.
    */
-  WDTCSR |= (1 << WDP2) | (1 << WDP1); /* 1s */
+  //WDTCSR |= (1 << WDP2) | (1 << WDP1); /* 1s */
+  WDTCSR |= (1 << WDP3) | (1 << WDP0); /* 8s */
 }
 
 static void power_saving(void)
@@ -372,9 +377,9 @@ int main(void)
 
   for (;;) {
     if (testmode) {
-      _delay_ms(1000);
+      //_delay_ms(1000);
       g_measure = 1;
-      g_transmit = 1;
+      g_transmit = 0;
       frame[0] = PREAMBLE_1;
       frame[1] = PREAMBLE_2;
       frame[2] = 0x21;
