@@ -26,8 +26,9 @@
 
 #define NO_RTX        5
 
-#define TYPE_TRH      0x01
-#define TYPE_T        0x02
+#define TYPE_TRH      0x01  /* Temperature and relative humitidy */
+#define TYPE_T        0x02  /* Temperature only */
+#define TYPE_TB       0x03  /* Temperature and battery status */
 #define FRAMEBUFSIZE  10
 
 #define RF_ON()       PORTD |= (1 << PD5)
