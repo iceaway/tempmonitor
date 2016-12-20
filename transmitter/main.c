@@ -2,6 +2,7 @@
 #include <avr/interrupt.h>
 #include <avr/sleep.h>
 #include <avr/pgmspace.h>
+#include <avr/wdt.h>
 #include <util/delay.h>
 #include <stdlib.h>
 #include <stdint.h>
@@ -11,11 +12,12 @@
 #include "i2c.h"
 #include "hdc1008.h"
 
-/* TX interval in x8 seconds, i.e. 16 => 8*16 = 128 s.
+/* TX interval in x8+1 seconds, i.e. 16 => 8*16 = 128 s.
  * There is no need to update the temperature more often than once every 128s
  * and we want to reserve battery power so long delays are a plus.
  */
-#define TX_INTERVAL       16 
+#define TX_INTERVAL       15 
+//#define TX_INTERVAL       0 
 
 #define ENABLE_TX_TIMER()   TCCR0B |= (1 << CS00)
 #define DISABLE_TX_TIMER()  TCCR0B &= ~(1 << CS00)
@@ -83,43 +85,13 @@ static uint8_t get_address(void);
 static uint8_t g_seqno = 0;
 static volatile uint8_t g_measure = 0;
 static volatile uint8_t g_transmit = 0;
+static volatile uint8_t g_first_frame = 0;
 static volatile uint8_t g_nextbit = 0;
 static volatile uint8_t g_txfinished = 0;
 
 ISR(WDT_OVERFLOW_vect)
 {
-  enum state {
-    WAIT,
-    TRANSMIT
-  };
-  static enum state s = WAIT;
-  static uint8_t rtx = 0;
-  static uint8_t cycles = TX_INTERVAL;
-  
-  switch (s) {
-  case WAIT:
-    if (cycles-- == 0) {
-      s = TRANSMIT;
-      g_measure = 1;
-      g_seqno = (g_seqno + 1) % 16;
-      rtx = NO_RTX;
-    }
-    break;
-
-  case TRANSMIT:
-    if (rtx-- == 0) {
-      cycles = TX_INTERVAL;
-      s = WAIT;
-    } else {
-      g_transmit = 1;
-    }
-    break;
-
-  default:
-    cycles = TX_INTERVAL;
-    s = WAIT;
-    break;
-  }
+  //PORTB ^= (1 << PB0);
 }
 
 ISR(TIMER0_COMPA_vect)
@@ -140,6 +112,18 @@ ISR(TIMER0_OVF_vect)
 {
   //PORTB ^= (1 << PB0);
 }
+
+static void pulse_debug(uint16_t plen, uint8_t count)
+{
+  int i;
+  for (i = 0; i < count; ++i) {
+    PORTB |= (1 << PB0);
+    _delay_ms(plen);
+    PORTB &= ~(1 << PB0);
+    _delay_ms(plen);
+  }
+}
+
 
 static uint8_t crc(uint8_t *buf, size_t buflen)
 {
@@ -265,7 +249,7 @@ static uint8_t get_address(void)
 static void gpio_init(void)
 {
   /* Test output pins */
-  //DDRB |= (1 << PB0);
+  DDRB |= (1 << PB0);
   //DDRB |= (1 << PB1);
 
   /* Soft uart - RF data. Set an output - high */
@@ -296,6 +280,38 @@ static void gpio_init(void)
   PORTD |= 1 << PD3;
 }
 
+#define PRESCALER_8K    0
+#define PRESCALER_1024K 1
+#define PRESCALER_128K  2
+
+static void watchdog_prescaler(uint8_t prescaler)
+{
+  cli();
+  wdt_reset();
+
+  switch (prescaler) {
+  case PRESCALER_8K:
+    WDTCSR |= (1 << WDCE) | (1 << WDE);
+    WDTCSR = (1 << WDP1) | (1 << WDIE);
+    break;
+
+  case PRESCALER_128K:
+    WDTCSR |= (1 << WDCE) | (1 << WDE);
+    WDTCSR = (1 << WDP2) | (1 << WDP1) | (1 << WDIE);
+    break;
+
+  case PRESCALER_1024K:
+    WDTCSR |= (1 << WDCE) | (1 << WDE);
+    WDTCSR = (1 << WDP0) | (1 << WDP3) | (1 << WDIE);
+    break;
+
+  default:
+    break;
+
+  }
+  sei();
+}
+
 static void watchdog_init(void)
 {
   /*
@@ -306,18 +322,19 @@ static void watchdog_init(void)
    * is approximately 8 s. This is perfectly fine for updating the temperature.
    */
 
-  /* Enable interrupt only, no reset */
-  WDTCSR = (1 << WDIE);
-
+  wdt_reset();
   /* Enable changes to prescaler */
-  WDTCSR |= (1 << WDCE);
+  WDTCSR |= (1 << WDCE) | (1 << WDE);
 
   /* 
    * Set prescaler to timeout every 8 s. When waking up we check if it is
    * time to transit, otherwise we go back to sleep for another 8s.
    */
   //WDTCSR |= (1 << WDP2) | (1 << WDP1); /* 1s */
-  WDTCSR |= (1 << WDP3) | (1 << WDP0); /* 8s */
+  //WDTCSR |= (1 << WDP3) | (1 << WDP0); /* 8s */
+  /* Enable interrupt (WDIE) and set prescaler to time out every 8s */
+  WDTCSR = (1 << WDP2) | (1 << WDP1) | (1 << WDIE); /* 8s */
+  //WDTCSR |= (1 << WDP1); /* 64 ms */
 }
 
 static void power_saving(void)
@@ -351,11 +368,19 @@ static void timer_init(void)
 
 int main(void)
 {
+  enum state {
+    IDLE,
+    MEASURE,
+    TRANSMIT
+  } s = MEASURE;
+
   uint8_t frame[FRAMEBUFSIZE];
   int16_t realtemp = 0;
   uint16_t rh = 0;
   size_t len;
   uint8_t testmode = 0;
+  uint8_t cycles = 0;
+  uint8_t rtx = 0;
 
   gpio_init();
   timer_init();
@@ -368,6 +393,9 @@ int main(void)
   /* Enable interrupts globally */
   sei();
 
+  /* The HDC1008 chip needs ~15ms to start up */
+  _delay_ms(20);
+
   /* Configure HDC1008 */
 #ifdef CONFIGURE_HDC1008
   hdc1008_set_address(0x40);
@@ -378,11 +406,62 @@ int main(void)
   hdc1008_set_mode(HDC_BOTH);
 
   for (;;) {
+    switch (s) {
+    case IDLE:
+      if (cycles == 0) {
+        s = MEASURE;
+        /* Fall through directly to measure */
+      } else {
+        --cycles;
+        break;
+      }
+
+    case MEASURE:
+      /* Measure temp and rh */
+      hdc1008_measure_both(&realtemp, &rh);
+
+      /*
+       * Do a sanity check of the returned data. 
+       * RH range is 0-100 and temperature range is
+       * -40 to 125. The scale is x10 in raw values.
+       */
+      if ((realtemp < -400) || (realtemp > 1250) ||
+          (rh > 1000)) {
+        s = IDLE;
+        cycles = TX_INTERVAL;
+        break;
+      }
+
+      s = TRANSMIT;
+      g_seqno = (g_seqno + 1) % 16;
+
+      /* Set no of retransmissions */
+      rtx = NO_RTX;
+
+      /* 
+       * Change watchdog timeout to 64 ms to generate quick retransmissions
+       * of data.
+       */
+      watchdog_prescaler(PRESCALER_8K);
+      /* Intentional fall-through to TRANSMIT */
+
+    case TRANSMIT:
+      /* Build and transmit frame with data. */
+      if (rtx != 0) {
+        len = frame_build(frame, FRAMEBUFSIZE, realtemp, rh);
+        rf_tx(frame, len);
+        --rtx;
+      } else {
+        /* Change prescaler back to 8s */
+        watchdog_prescaler(PRESCALER_1024K);
+        s = IDLE;
+        cycles = TX_INTERVAL;
+      }
+      break;
+    };
+
     if (testmode) {
       _delay_ms(1000);
-      g_measure = 1;
-      g_transmit = 1;
-      g_seqno = (g_seqno + 1) % 16;
       frame[0] = PREAMBLE_1;
       frame[1] = PREAMBLE_2;
       frame[2] = 0x21;
@@ -411,18 +490,6 @@ int main(void)
       /* Set PD4 and PD5 as outputs again */
       DDRD |= (1 << PD4);
       DDRD |= (1 << PD5);
-    }
-
-    if (g_measure) {
-      hdc1008_measure_both(&realtemp, &rh);
-      g_measure = 0;
-    }
-
-    if (g_transmit) {
-      /* Build and transmit frame with data. */
-      len = frame_build(frame, FRAMEBUFSIZE, realtemp, rh);
-      rf_tx(frame, len);
-      g_transmit = 0;
     }
   }
 }
